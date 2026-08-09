@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# Required: where budget alerts are sent. You must click the confirmation link
+# AWS emails to this address, or the alerts silently never arrive.
+budget_alert_email = "you@example.com"
+
+# Optional overrides — defaults are usually correct.
+# aws_region         = "us-east-1"
+# aws_account_id     = "594380318102"
+# monthly_budget_usd = "20"

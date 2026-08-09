@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "AWS_PROFILE": "ai-agent",
+    "AWS_REGION": "us-east-1"
+  },
+  "permissions": {
+    "deny": [
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(terraform state rm:*)",
+      "Bash(terraform state mv:*)",
+      "Bash(terraform force-unlock:*)",
+      "PowerShell(terraform apply:*)",
+      "PowerShell(terraform destroy:*)",
+      "PowerShell(terraform state rm:*)",
+      "PowerShell(terraform state mv:*)",
+      "PowerShell(terraform force-unlock:*)"
+    ],
+    "allow": [
+      "Bash(aws sts get-caller-identity:*)",
+      "Bash(aws iam get-user:*)",
+      "Bash(aws iam list-attached-user-policies:*)",
+      "Bash(aws bedrock list-foundation-models:*)",
+      "Bash(aws bedrock list-inference-profiles:*)",
+      "Bash(aws bedrock get-foundation-model:*)",
+      "Bash(terraform validate:*)",
+      "Bash(terraform fmt:*)",
+      "Bash(terraform init:*)"
+    ]
+  }
+}

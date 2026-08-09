@@ -1,0 +1,54 @@
+[project]
+name = "ai-pre-traffic-gate"
+version = "0.1.0"
+description = "An agentic deployment gate that decides whether a change is safe to deploy, using Amazon Bedrock."
+requires-python = ">=3.12"
+
+dependencies = [
+    # boto3 is provided by the Lambda runtime, but pinning locally keeps the
+    # dev environment honest about which API surfaces exist. The runtime's
+    # bundled boto3 lags, so anything new gets vendored into the deployment
+    # package rather than assumed present.
+    "boto3>=1.40.0",
+    # Schema validation is the fail-closed boundary between the model and the
+    # executor. It is a runtime dependency, not a dev nicety.
+    "jsonschema>=4.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "moto>=5.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "S",   # bandit — this project is about security posture, so lint for it
+]
+ignore = [
+    "S101", # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    # Anything hitting real AWS is opt-in. The default test run must work
+    # offline with zero credentials — constraint 5 in CLAUDE.md.
+    "aws: touches real AWS APIs (deselect with '-m \"not aws\"')",
+    "bedrock: makes a billable Bedrock call",
+]

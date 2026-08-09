@@ -1,0 +1,50 @@
+# --- Terraform ---
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# Never commit real variable values; commit the .example files instead.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+.terraformrc
+terraform.rc
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# --- AWS / secrets ---
+.aws/
+*.pem
+credentials
+.env
+.env.*
+!.env.example
+
+# --- Build artifacts ---
+*.zip
+!tests/fixtures/**/*.zip
+
+# --- Editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- Claude Code ---
+.claude/settings.local.json
