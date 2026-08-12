@@ -173,6 +173,332 @@ adding Slack later means adding a subscriber, not changing the publisher.
 
 ---
 
+## D-010 — CodeDeploy owns the Lambda alias, Terraform yields it
+
+**Decision:** `aws_lambda_alias.live` declares `lifecycle { ignore_changes = [function_version, routing_config] }` from the moment it is created, before CodeDeploy exists.
+
+**Why:** Two systems both have a legitimate claim on which version the alias
+points at. Terraform believes it owns everything it declares; CodeDeploy
+actively rewrites `function_version` on every deploy and `routing_config`
+during a canary. Without `ignore_changes`, any subsequent `terraform apply` —
+including one for a completely unrelated resource elsewhere in the stack —
+resets the alias to the version Terraform last recorded.
+
+That failure is nasty specifically because it is *silent and delayed*. The
+deploy succeeds, CodeDeploy reports green, and the rollback happens later when
+someone applies an unrelated change. The symptom is "production reverted
+itself", with the actual cause several hours and one unrelated commit away.
+
+**The general rule:** Terraform declares intent; some state is owned by a
+runtime system. Where both claim a value, one must yield explicitly and the
+yield belongs in the code from the start, not added after the first incident.
+
+**Cost of being wrong:** none — if we later decide Terraform should own the
+alias, removing the lifecycle block is a one-line change.
+
+---
+
+## D-011 — Function URL pinned to the alias, authenticated with AWS_IAM
+
+**Decision:** `aws_lambda_function_url` sets `qualifier = "live"` and
+`authorization_type = "AWS_IAM"`.
+
+**Why the qualifier:** an unqualified function URL serves `$LATEST`, which
+CodeDeploy never touches. The canary would shift traffic between versions that
+no caller ever reaches — a deployment that reports success while changing
+nothing observable. This is a quietly common misconfiguration because
+everything looks correct until you try to prove the canary worked.
+
+**Why AWS_IAM now, while the app is harmless:** in Phase 2.5 this same function
+gains dependencies with published CVEs so Amazon Inspector emits genuine
+findings. CLAUDE.md's safety rule is that it must never be internet-reachable
+without auth. Setting auth at creation means there is no later moment where
+someone has to remember to lock it down — the vulnerable dependencies land in a
+service that is already closed.
+
+**Consequence:** every call needs SigV4 signing. That is friction during
+development, so the stack emits a ready-to-run signed `curl` as an output; an
+unsigned request returns a bare 403 that explains nothing.
+
+---
+
+## D-012 — Scoped log policy instead of AWSLambdaBasicExecutionRole
+
+**Decision:** Lambda execution roles get an inline policy scoped to their own
+log group ARN, not the AWS-managed `AWSLambdaBasicExecutionRole`.
+
+**Why:** the managed policy grants `logs:CreateLogGroup` on `*`, letting the
+function write to any log group in the account. Since Terraform pre-creates the
+one log group each function needs — which it does anyway, to set retention and
+avoid the never-expire default Lambda applies — `CreateLogGroup` is not needed
+at all.
+
+For the demo app this is a trivial win; it is harmless either way. It matters
+because Phase 3's central constraint is that the decision service holds no
+deploy permissions, and that argument is far easier to make from a codebase
+that already scopes permissions everywhere than from one that reaches for the
+convenient managed policy by default and makes an exception for the important
+case.
+
+---
+
+## D-013 — arm64 for Lambda
+
+**Decision:** demo app runs on `arm64` rather than `x86_64`.
+
+**Why:** roughly 20% cheaper per GB-second at identical performance for pure
+Python with no compiled dependencies. Free-tier usage makes the saving
+negligible now, but Phase 8's soak runs continuous synthetic traffic for weeks
+and the same default carries over.
+
+**Watch for:** any dependency with compiled native extensions must be built for
+arm64. The demo app has no dependencies today. When Phase 2.5 pins libraries
+with known CVEs, confirm arm64 wheels exist or switch that function to x86_64 —
+this is a plausible source of a confusing `Runtime.ImportModuleError`.
+
+---
+
+## D-014 — Fail-closed is the default branch, not an exception handler
+
+**Decision:** the gate resolves its verdict by matching against an explicit
+allow-list of recognised values; **every** other input — unset, empty,
+whitespace, misspelled, unexpected exception — falls through to `halt`. There is
+no code path that reaches `allow` other than by exact match, and no
+`except: return allow` anywhere in the codebase.
+
+**Why the distinction matters:** "fail closed" implemented as an exception
+handler only covers the failures you thought of. CLAUDE.md's constraint 2 lists
+model unavailable, schema invalid, signals missing, and throttling — and F-004
+had already produced a failure outside that list (an unsubscribed AWS
+Marketplace agreement) before any model existed. A catch-all default covers the
+failure modes nobody has met yet, which is the entire population that matters.
+
+**The tell that this is right:** the test file is a table of nine wrong values,
+all asserting `halt`. Adding a tenth way to be wrong is a one-line change and
+requires no new branch in the handler. If fail-closed were an exception handler,
+each new failure mode would need its own `except` clause — and the ones nobody
+anticipated would return whatever the happy path returns.
+
+**Cost:** a misconfigured gate blocks deploys rather than passing them. That is
+noisy and visible within minutes, which is the failure direction we want.
+
+---
+
+## D-015 — Mode is separate from verdict; an unreadable mode fails to `enforcing`
+
+**Decision:** the verdict (what the gate concluded) and the mode (whether anyone
+acts on it) are computed independently. An unrecognised **verdict** becomes
+`halt`; an unrecognised **mode** becomes `enforcing`.
+
+**Why they are separate:** it is what makes shadow mode a first-class mode
+rather than a disabled feature (constraint 4). In shadow the verdict is computed
+and recorded in full, and then deliberately not acted upon — so
+`would_have_halted` is populated on every evaluation and is the field Phase 4
+and Phase 8 count to get an over-flagging rate. A design where shadow mode
+short-circuits before producing a verdict would measure nothing.
+
+**Why the mode default is `enforcing`:** both defaults point the same way — stop
+the deploy. The failure we are unwilling to accept is a change reaching
+production because a config value was misspelled.
+
+**The cost, stated plainly because it is a real trade:** a typo in `GATE_MODE`
+turns an intended shadow-mode rollout into an enforcing one, and the gate starts
+blocking deploys nobody expected it to touch. That is worse than it sounds
+during a company-wide Phase 7 rollout. We accept it because an over-eager gate
+announces itself immediately, whereas a silently disabled one is discovered by
+the incident it failed to prevent. Phase 7 should add an explicit assertion on
+resolved mode at pipeline start rather than relying on this default.
+
+---
+
+## D-016 — The gate holds no deploy permissions from increment 2, not from Phase 5
+
+**Decision:** the gate stub is a separate Lambda with its own role whose entire
+permission set is two log actions and the two CodePipeline job-result calls. No
+`lambda:UpdateAlias`, no `lambda:UpdateFunctionCode`, no `codedeploy:*`, no
+`iam:PassRole`.
+
+**Why now rather than in Phase 5:** the separation is the project's central
+security claim. Building it as one function and splitting it later would mean
+the split had never been tested, and the Phase 5 diff would be the first time
+anyone found out which permissions the decision path had quietly come to depend
+on.
+
+**What it actually buys, and it is worth being precise:** from Phase 2 the gate's
+input includes commit messages, branch names, and file paths — attacker-
+influenced text on any repository that accepts pull requests. From Phase 3 that
+text is fed to a language model whose output steers a decision. The design
+assumption is that prompt injection against that model will sometimes succeed.
+What makes that survivable is that the most a successful injection can achieve
+is a wrong verdict *record*: it cannot deploy, because the credentials to deploy
+are not in the process. The blast radius is bounded by IAM, not by the model
+behaving well.
+
+`PutJobSuccessResult` is the one action that lets the gate influence a pipeline,
+and it is bounded too — it can only report on a job the pipeline already handed
+it, and reporting success is exactly what happens if the gate is absent
+entirely. It cannot start a deploy that was not already running.
+
+---
+
+## D-017 — Managed policy for the CodeDeploy service role: a stated exception to D-012
+
+**Decision:** the CodeDeploy service role attaches the AWS-managed
+`AWSCodeDeployRoleForLambdaLimited` rather than a hand-written inline policy.
+
+**Why this does not contradict D-012:** D-012 applies to roles we own, where we
+know the complete set of actions our own code performs. This is a role AWS
+assumes to operate its own service. The required permissions belong to
+CodeDeploy and change when CodeDeploy changes; hand-rolling them buys a
+marginally tighter policy today in exchange for a deployment that fails months
+from now with an `AccessDenied` on an action that did not exist when we wrote it.
+
+**Why the `Limited` variant:** it grants four actions — `lambda:UpdateAlias`,
+`GetAlias`, `GetProvisionedConcurrencyConfig`, `cloudwatch:DescribeAlarms` —
+plus S3 reads for S3-sourced AppSpecs. The unrestricted
+`AWSCodeDeployRoleForLambda` additionally grants `sns:Publish` and broader Lambda
+access we have no use for. Taking the tighter of the two AWS-provided options is
+the D-012-consistent choice within the constraint.
+
+**The general principle:** least privilege means owning the permissions you can
+reason about and delegating the ones the service owns. Writing a worse version of
+someone else's policy is not a security win.
+
+**Noted for Phase 5:** the `Limited` policy scopes hook invocation to functions
+named `CodeDeployHook_*`. A `BeforeAllowTraffic` validation hook — the natural
+place for the executor to verify a canary — must either adopt that name prefix or
+get its own role. Easier to know now than to discover from an `AccessDenied`
+mid-deployment.
+
+---
+
+## D-018 — A custom canary config, because the fastest built-in one is five minutes
+
+**Decision:** a custom `aws_codedeploy_deployment_config` shifting 10% for 1
+minute, rather than `CodeDeployDefault.LambdaCanary10Percent5Minutes`.
+
+**Why:** the fastest built-in Lambda canary holds for five minutes. That is a
+sensible bake time and an unusable stage demo — five minutes of narrating a
+progress bar. The custom config makes the shift watchable in about a minute.
+
+**Why this is not a hack:** the deployment config is a separate resource from the
+deployment group precisely so the *shape* of a rollout can change without
+touching what is deployed or how rollback works. Demo cadence and production
+cadence being different numbers in the same code is the intended use. Both are
+variables; Phase 7 should raise them substantially.
+
+**Related:** for the Lambda compute platform the deployment **target** (function
+and alias) comes from the AppSpec supplied per deployment, not from the
+deployment group — the group holds only policy. That is why
+`scripts/deploy_canary.py` constructs an AppSpec rather than just naming a
+target, and it is why the same group can later deploy the executor without being
+redefined.
+
+---
+
+## D-019 — The canary script observes the traffic split rather than trusting the deployment status
+
+**Decision:** `scripts/deploy_canary.py` samples the alias while the deployment
+runs and reports whether both versions were seen serving simultaneously,
+separately from CodeDeploy's own status.
+
+**Why:** "CodeDeploy reported Succeeded" and "callers received a mix of both
+versions" are different claims, and only the second one means the canary works.
+The most common way to get this wrong — an alias reference or function URL that
+quietly resolves to `$LATEST` — produces a green deployment and a traffic split
+of exactly 0%. Nothing in the deployment status distinguishes that from a
+correct canary.
+
+This is the same discipline as `scripts/check_bedrock_access.py`, which asserts
+that a Converse call returns schema-valid JSON rather than that Bedrock is
+reachable. Assert the outcome you actually care about, not the nearest thing
+that is easy to check.
+
+**What the first real run taught us, and it changes Phase 5.** The script reports
+*whether both versions were seen*, not the ratio — and that turned out to be the
+only defensible claim it can make at 20 samples per poll. At a true 10% split,
+a single 20-sample poll catches zero canary responses about 12% of the time, and
+its 95% range is roughly 0–23%. The first live run duly showed two consecutive
+polls at `v1=100%` mid-canary, on a completely healthy deployment.
+
+Pinning a 10% split to ±2 points needs on the order of 900 samples. The
+consequence for Phase 5 is concrete: any automated canary judgement of the form
+"roll back if the canary's error rate looks elevated" is reading noise unless the
+canary is receiving substantially more traffic than a demo generates. The
+executor must either bake long enough to accumulate real samples, or defer to
+CloudWatch alarms with their own statistical windows, rather than sampling and
+comparing. Recorded here because it is the kind of thing that looks like a bug in
+the observer and is actually a limit on what can be known.
+
+---
+
+## D-020 — Lambda over ECS as the deployment target, reconsidered on purpose
+
+**Decision:** the demo app stays a Lambda. Revisited deliberately at the end of
+Phase 1, once the cost of the choice was visible rather than hypothetical.
+
+**What prompted the review:** CodePipeline has no action that drives a CodeDeploy
+*Lambda* deployment, so increment 3 required a custom executor Lambda. ECS has a
+native `CodeDeployToECS` action. The reasonable question was whether we had
+picked a target that fights the tooling.
+
+**First, a correction worth keeping straight.** CodeDeploy has first-class Lambda
+support — weighted alias shifting, canary configs, auto-rollback. The gap is one
+seam narrower: *CodePipeline* has no action for it. The documented AWS path for
+Lambda-in-a-pipeline is CloudFormation/SAM, where `DeploymentPreference`
+generates the CodeDeploy deployment. Our executor does by hand what SAM would
+generate.
+
+**The comparison:**
+
+| | Lambda | ECS Fargate |
+| --- | --- | --- |
+| Pipeline action | none; ~150 lines of Python | native `CodeDeployToECS` |
+| Infrastructure | function, alias, log group | VPC, subnets, IGW, routes, SGs, ALB, listener, 2 target groups, cluster, task def, service, ECR |
+| Artifact | a zip | a container image, plus `taskdef.json`/`appspec.yaml` placeholder substitution |
+| Deploy duration | ~60s | 5–10 min |
+| Standing cost | ~$0 | ~$26/month (ALB ~$17 + one 0.25vCPU task ~$9) |
+
+**Why Lambda won, in order of weight:**
+
+1. **Cost.** ECS breaches the hard constraint on standing hourly charges, and
+   Phase 8's multi-week soak multiplies it. ALB and Fargate bill whether or not
+   anyone is demoing.
+2. **The executor is not accidental complexity.** This is the argument that
+   actually settles it. The target architecture already specifies a separate
+   executor Lambda with its own role. Going native — via SAM or
+   `CodeDeployToECS` — would *delete the component the talk is about*, and Phase
+   5 would rebuild it to read verdicts and branch on risk level. The custom code
+   is Phase 5 arriving early with its permission boundary already tested.
+3. **"Native" is not "simpler overall."** ECS removes ~150 lines at one seam and
+   adds ~300 lines of networking plus a container build.
+4. **Stage reliability.** 60 seconds versus 5–10 minutes, over conference wifi,
+   with ALB health checks in the path.
+5. **Explainability.** "An alias points at two versions with a weight" is one
+   sentence. ECS blue/green needs a diagram and assumes the audience knows ALBs.
+
+**What ECS would genuinely have been better at**, recorded so the trade is
+honest: the native pipeline action; richer Amazon Inspector findings, since ECR
+image scanning covers OS *and* language packages while Lambda scanning sees only
+the deployment package; closer resemblance to what much of the audience runs;
+and health-check-driven rollback that feels more real than alias weights.
+
+**The reframe that makes this a small decision.** The gate is
+**deployment-target agnostic**. The decision service collects signals and emits
+a verdict; it does not know what is being deployed. Only the executor knows. So
+the demo target is an implementation detail of the *demo*, not of the
+architecture — and "this is Lambda because Lambda was cheap to demo; here are
+the twenty lines that would make it ECS" is a better talk moment than either
+choice on its own.
+
+**Deferred, not rejected:** an ECR repository holding a deliberately vulnerable
+image purely as an Inspector signal source, never executed. It recovers ECS's
+strongest advantage for a few cents. Revisit in Phase 2.5 when the Inspector
+collector is real and we can see whether Lambda scanning produces enough
+findings on its own.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

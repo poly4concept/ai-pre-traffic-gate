@@ -14,17 +14,28 @@ Reference implementation for **"Giving Your Pipeline Judgment: An Agentic
 Deployment Gate with Amazon Bedrock"**, AWS Community Day West Africa 2026
 (Lagos, 16–17 October 2026).
 
-> **Status: Phase 0, one item outstanding.** Groundwork only. No pipeline, no
-> model calls in production paths, nothing deployed.
+> **Status: Phase 1, increment 3 of 3.** No AI anywhere in the system yet, by
+> design — Phase 1 exists to prove the boring deploy path works before a model
+> can be blamed for anything.
 >
-> Done: repo scaffold, Terraform bootstrap applied (state bucket + $20/month
-> budget), main stack initialised against the S3 backend, read-only agent
-> identity verified.
+> **Done and verified against real AWS:**
 >
-> Outstanding: Bedrock is not yet invokable — the account-level Anthropic use
-> case details form has not been approved. IAM and model IDs are already
-> correct; see [FAILURES.md](FAILURES.md) F-004. Phase 1 does not depend on
-> this and can start regardless. Phase 3 does.
+> - Phase 0 groundwork — state bucket, $20/month budget, read-only agent identity
+> - Demo app Lambda, `live` alias, IAM-authenticated function URL
+> - CodeDeploy canary — **observed** shifting traffic between two versions
+>   simultaneously, not merely reported as succeeded
+> - Hardcoded halt Lambda holding no deploy permissions, fail-closed on any
+>   unrecognised input
+>
+> **Outstanding:**
+>
+> - **Increment 3** — CodePipeline + CodeBuild. Blocked on a GitHub repo to use
+>   as the pipeline source.
+> - **Bedrock invocation** — blocked on a billing gate, not a permissions one.
+>   The account needs a valid payment instrument before AWS Marketplace will
+>   complete the Anthropic model subscription; promotional credits do not
+>   satisfy it. See [FAILURES.md](FAILURES.md) F-004. Nothing before Phase 3
+>   depends on this.
 
 ---
 

@@ -1,0 +1,51 @@
+# CodeBuild spec for the demo app. Phase 1 increment 3.
+#
+# This build does something slightly unusual: it produces an artifact that IS
+# the Lambda deployment package, rather than a package containing one.
+# `base-directory` below makes CodePipeline's output zip contain handler.py at
+# its root, which is exactly the layout Lambda expects. The executor can then
+# hand those bytes straight to UpdateFunctionCode with no unpacking step and no
+# nested-zip confusion.
+#
+# The build also runs the full test suite and linter. That is not ceremony: the
+# gate in the next stage is about to decide whether this change is safe, and a
+# change that does not compile or pass its own tests should never get as far as
+# being judged on its risk.
+
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      # Pinned to 3.12 because pyproject requires >=3.12 and 3.12 is present in
+      # the amazonlinux-aarch64-standard:3.0 image. The Lambda runtime is 3.13 --
+      # the mismatch is deliberate and harmless, since the build only lints,
+      # tests and zips a single dependency-free file. It never compiles anything
+      # that has to match the runtime.
+      #
+      # If this ever fails with "Unknown runtime version", this line is the fix:
+      # check `aws codebuild list-curated-environment-images` for what the image
+      # actually ships.
+      python: 3.12
+
+  pre_build:
+    commands:
+      - python --version
+      - python -m pip install --quiet --upgrade pip
+      - python -m pip install --quiet -e ".[dev]"
+
+  build:
+    commands:
+      - echo "Building commit ${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+      - python -m ruff check .
+      - python -m ruff format --check .
+      - python -m pytest
+
+artifacts:
+  # The two lines that make the artifact a valid Lambda package. Change these
+  # and the executor's UpdateFunctionCode call starts failing with an unhelpful
+  # "Unzipped size must be smaller than..." or a missing-handler error at
+  # runtime.
+  base-directory: services/demo_app
+  files:
+    - handler.py

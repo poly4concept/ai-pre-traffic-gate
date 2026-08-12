@@ -24,7 +24,7 @@ about its own failure modes.
 DevOps engineer, ~5 years, AWS Certified DevOps Engineer Professional, AWS
 Community Builder. Comfortable with IaC, CI/CD, Lambda, containers. Less
 experienced with Bedrock and agentic patterns specifically — explain model-side
-choices (prompt structure, tool use, schema validation) more than you explain
+choices (prompt structure, tool use, schema validation) as much as you explain
 AWS plumbing.
 
 ## Target architecture
@@ -141,7 +141,7 @@ Do not jump ahead. Each phase must work before the next starts.
   a Slack workspace is available) rather than guessing. Then confirm the Phase 0
   + Phase 1 plan before writing code.
 - Small, reviewable increments. I want to understand every piece, because I have
-  to explain it on stage to an intermediate audience.
+  to explain it on stage to an intermediate audience. So you should also explain to me what we are doing at each phase and increment, again because I need to understand what I'll teaching other people
 - When you make a model-side design choice (prompt structure, how the schema is
   shaped, temperature, which signals go in which order), explain the reasoning
   briefly — that reasoning is talk content.

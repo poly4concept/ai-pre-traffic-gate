@@ -70,7 +70,9 @@ VERDICT_SCHEMA: dict[str, Any] = {
             "type": "number",
             "minimum": 0,
             "maximum": 1,
-            "description": "Self-reported confidence. Recorded for analysis; never used for routing.",
+            "description": (
+                "Self-reported confidence. Recorded for analysis; never used for routing."
+            ),
         },
         "reasoning": {
             "type": "string",
@@ -99,7 +101,7 @@ You are a deployment risk assessor. Assess the following change.
   <lines_added>1</lines_added>
   <lines_removed>1</lines_removed>
   <deploy_time>Tuesday 10:14 UTC</deploy_time>
-  <target_service_health>No active alarms. Error rate 0.02%. p99 latency 180ms.</target_service_health>
+  <target_service_health>No active alarms. Error rate 0.02%. p99 180ms.</target_service_health>
   <security_findings>None.</security_findings>
 </change>
 
@@ -152,11 +154,7 @@ def list_models(region: str) -> list[dict[str, Any]]:
         info("Needs bedrock:ListFoundationModels - included in the ReadOnlyAccess policy.")
         return []
 
-    models = [
-        m
-        for m in resp.get("modelSummaries", [])
-        if "TEXT" in m.get("outputModalities", [])
-    ]
+    models = [m for m in resp.get("modelSummaries", []) if "TEXT" in m.get("outputModalities", [])]
 
     def types(m: dict[str, Any]) -> list[str]:
         return m.get("inferenceTypesSupported", [])
@@ -246,7 +244,10 @@ def validate_verdict(payload: Any) -> list[str]:
         return errors
 
     validator = jsonschema.Draft202012Validator(VERDICT_SCHEMA)
-    return [f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}" for e in validator.iter_errors(payload)]
+    return [
+        f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}"
+        for e in validator.iter_errors(payload)
+    ]
 
 
 def check_tool_use(region: str, model_id: str) -> bool:
@@ -294,18 +295,61 @@ def check_tool_use(region: str, model_id: str) -> bool:
         fail(f"Converse failed: {code}")
         info(message)
 
-        # Three independent gates sit in front of a Bedrock call, and the error
-        # CODE only identifies one of them correctly. Notably a missing
-        # account-level use case approval surfaces as ResourceNotFoundException,
-        # which sends you hunting for a typo in a model ID that is perfectly
-        # fine. Match on the message text, not just the code. See FAILURES.md
-        # F-004.
-        if "use case" in message.lower():
+        # FIVE independent gates sit in front of a Bedrock call and there are
+        # only three error codes between them, so the code alone cannot tell
+        # you where you are. Three separate causes share
+        # AccessDeniedException. Everything below therefore matches on message
+        # text, case-insensitively, ordered most-specific first. See
+        # FAILURES.md F-004.
+        #
+        # Matching on message text is fragile -- AWS can reword these. That is
+        # an acceptable trade here because the fallback is the generic branch,
+        # which is merely unhelpful rather than wrong. The earlier version of
+        # this code matched "aws-marketplace" against a message that said "AWS
+        # Marketplace" and confidently printed advice about the wrong gate,
+        # which is worse than saying nothing.
+        lowered = message.lower()
+
+        if "payment" in lowered:
+            # Not a permissions problem at all. Marketplace subscriptions
+            # require a valid payment instrument on the account even when the
+            # subscription itself costs nothing and usage is covered by
+            # credits. Credits are not a payment instrument.
+            info("")
+            info("This is a BILLING gate. Nothing in this repo can fix it.")
+            info("AWS Marketplace requires a valid payment method on the account")
+            info("before it will complete any subscription -- including free ones,")
+            info("and including accounts holding promotional credits.")
+            info("")
+            info("Fix: AWS Billing console -> Payment preferences -> add a card.")
+            info("May require the root user if IAM billing access is not enabled.")
+            info("Then re-run. Propagation is usually a couple of minutes.")
+        elif "marketplace" in lowered:
+            # Distinct from an IAM ARN mistake despite sharing the error code.
+            # Anthropic models are delivered through AWS Marketplace, and the
+            # account must hold a subscription. The subscription is created by
+            # the FIRST invocation, by a principal holding
+            # aws-marketplace:Subscribe -- which a read-only agent identity
+            # deliberately does not have, and should not be given.
+            info("")
+            info("This is a MARKETPLACE SUBSCRIPTION gate, not an IAM ARN mistake.")
+            info("The account has no subscription for this model yet. It is created")
+            info("by the first invocation, which must come from a principal with")
+            info("aws-marketplace:Subscribe -- i.e. an admin, not this agent.")
+            info("")
+            info("Run ONCE as the admin profile, then re-run normally:")
+            info("    $env:AWS_PROFILE = 'poly4'; python scripts/check_bedrock_access.py")
+            info("")
+            info("It is account-wide and one-time per model. Do not grant")
+            info("marketplace permissions to the read-only identity to work around it.")
+        elif "use case" in lowered:
             info("")
             info("This is an ACCOUNT-level gate, not an IAM or model-ID problem.")
-            info("Bedrock console -> Model access -> Anthropic -> submit the")
-            info("use case details form. Approval can take ~15 minutes.")
-            info("Re-run this script afterwards; nothing else needs changing.")
+            info("The old 'Model access' console page is RETIRED. Serverless models")
+            info("now auto-enable on first invoke, but Anthropic still requires a")
+            info("one-time use case form: Bedrock console -> Model catalog ->")
+            info("any Anthropic model -> submit use case details.")
+            info("Propagation takes ~15 minutes after submitting. Then re-run this.")
         elif code == "AccessDeniedException":
             info("Check the inference-profile ARN in the IAM policy names THIS account.")
             info("See docs/iam/ai-agent-bedrock-policy.json")

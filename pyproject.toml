@@ -23,6 +23,18 @@ dev = [
     "moto>=5.0.0",
 ]
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# This repo is not a distributable library. It is a set of Lambda handlers that
+# get zipped and deployed independently, plus scripts and tests. `pip install
+# -e .` exists only so the dependency set above is the single source of truth
+# for a dev venv -- there is nothing here to import as a package, so package
+# auto-discovery is switched off rather than left to guess and fail.
+packages = []
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

@@ -19,6 +19,12 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    # Used only to zip the demo app handler while it is a single dependency-free
+    # file. CodeBuild takes over artifact packaging in Phase 1 increment 3.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
   }
 
   backend "s3" {
