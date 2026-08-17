@@ -10,10 +10,23 @@ locals {
   gate_stub_name = "${var.project_name}-gate"
 }
 
+# Phase 2.2b: source_dir rather than source_file.
+#
+# The gate now imports the `signals` package, so the deployment package has to
+# contain the whole decision service directory rather than a single file. This
+# is also why the handler moved from services/gate_stub/ to
+# services/decision_service/ -- the gate IS the decision service, and keeping
+# the package importable from the zip root is what makes `from signals import
+# ...` work identically in Lambda and in the test suite.
+#
+# __pycache__ is excluded because it is machine- and version-specific. Including
+# it would change source_code_hash on every developer machine, producing
+# spurious Terraform diffs and pointless redeployments.
 data "archive_file" "gate_stub" {
   type        = "zip"
-  source_file = "${path.module}/../../services/gate_stub/handler.py"
+  source_dir  = "${path.module}/../../services/decision_service"
   output_path = "${path.module}/build/gate_stub.zip"
+  excludes    = ["__pycache__", "**/__pycache__/**", "**/*.pyc"]
 }
 
 # --- Execution role -------------------------------------------------------

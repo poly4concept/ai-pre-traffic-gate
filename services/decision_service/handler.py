@@ -1,9 +1,15 @@
-"""Phase 1 increment 2 -- the hardcoded halt.
+"""The decision service. Hardcoded verdict (Phase 1) + real signals (Phase 2).
 
-This is the decision service with the decision removed. No signals, no Bedrock,
-no schema: a single environment variable stands in for the verdict. Everything
-around that variable, though, is the real thing -- the fail-closed default, the
-three operating modes, the audit line, the CodePipeline contract.
+The decision itself is still a single environment variable -- no Bedrock, no
+schema, no judgement. Everything *around* that variable is real: the fail-closed
+default, the three operating modes, the audit line, the CodePipeline contract,
+and since Phase 2.2b a genuine signal bundle collected from the pipeline event.
+
+The signals are collected and logged but deliberately do not influence the
+verdict. That is Phase 3's job. Wiring collection in first, while the decision
+stays hardcoded, means that when a model finally arrives the signals feeding it
+are already known to be real -- the same reason Phase 1 built and proved the
+deploy path before any AI touched it.
 
 The point of building it this way is to make one claim testable before any model
 exists: *the pipeline can be halted, and the halt cannot be bypassed.* If that
@@ -32,6 +38,14 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
+
+from signals import (
+    DisabledCollector,
+    MockChangeContextCollector,
+    PipelineChangeContextCollector,
+    collect_signals,
+)
+from signals.types import DeploymentTarget
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -133,12 +147,11 @@ def build_verdict(request_id: str) -> dict[str, Any]:
 def report_to_codepipeline(job: dict[str, Any], verdict: dict[str, Any]) -> None:
     """Report the result back to CodePipeline, if we were invoked by one.
 
-    No pipeline exists yet (increment 3). This is written now because the
-    contract shapes the return value: CodePipeline does not read the response
-    payload of a Lambda invoke action at all -- it waits for an out-of-band
-    PutJobSuccessResult or PutJobFailureResult call. A gate that returns a
-    beautifully structured "halt" verdict and never calls PutJobFailureResult
-    reports success to the pipeline and the deploy proceeds.
+    The contract is the reason this function exists at all: CodePipeline does not
+    read the response payload of a Lambda invoke action -- it waits for an
+    out-of-band PutJobSuccessResult or PutJobFailureResult call. A gate that
+    returns a beautifully structured "halt" verdict and never calls
+    PutJobFailureResult reports success to the pipeline, and the deploy proceeds.
 
     That failure mode is silent, which is the only kind worth writing a comment
     about: the logs show a halt verdict, the audit record shows a halt verdict,
@@ -164,9 +177,69 @@ def report_to_codepipeline(job: dict[str, Any], verdict: dict[str, Any]) -> None
         logger.info("Reported job success to CodePipeline: %s", job_id)
 
 
+SERVICE_NAME = os.environ.get("TARGET_SERVICE", "ai-pre-traffic-gate-demo-app")
+
+
+def collect_bundle(event: dict[str, Any]) -> Any:
+    """Collect the signal bundle. Phase 2 -- logged, and acted on by nothing.
+
+    Deliberately does NOT influence the verdict yet. Phase 2's job is to produce
+    a normalized bundle; Phase 3 is where a verdict starts depending on one.
+    Wiring collection in first, with the decision still hardcoded, means that
+    when the model arrives we already know the signals are real -- the same
+    reason Phase 1 built the deploy path before any AI touched it.
+
+    Security findings and target health use DisabledCollector rather than mocks.
+    That matters: a mock here would put fabricated health data into the audit
+    trail of a real deployment, which is exactly the "absent signal read as a
+    reassuring one" failure the whole package exists to prevent. SKIPPED is the
+    honest status for a collector that does not exist yet.
+    """
+    change_collector: Any
+    if event.get("CodePipeline.job"):
+        change_collector = PipelineChangeContextCollector(event)
+    else:
+        # A direct invoke -- someone testing the function by hand. There is no
+        # pipeline job and therefore no change to describe. Left as a mock with
+        # nothing to return, which fails closed and says so, rather than
+        # pretending a change exists.
+        change_collector = MockChangeContextCollector()
+
+    return collect_signals(
+        target=DeploymentTarget(service_name=SERVICE_NAME),
+        change_collector=change_collector,
+        security_collector=DisabledCollector(
+            "security_findings", "not implemented until Phase 2.3"
+        ),
+        health_collector=DisabledCollector("target_health", "not implemented until Phase 2.4"),
+    )
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Evaluate the gate. Halts unless positively told to allow."""
     request_id = getattr(context, "aws_request_id", "unknown")
+
+    # Collected before the verdict and logged separately, so that a bug in
+    # collection cannot take the gate's decision path down with it. In Phase 2
+    # the gate must keep working exactly as it did in Phase 1.
+    try:
+        bundle = collect_bundle(event)
+        logger.info(json.dumps({"signal_bundle": bundle.to_dict()}))
+        logger.info(
+            "signals: %s | required present: %s",
+            bundle.completeness_summary,
+            bundle.has_required_signals,
+        )
+        if not bundle.has_required_signals:
+            # Phase 3 turns this into a halt. Saying so out loud now means the
+            # log already shows what the gate WILL do, which is the same shadow
+            # -mode discipline applied to a feature that does not exist yet.
+            logger.warning(
+                "change context unavailable: %s -- from Phase 3 this routes to human review",
+                bundle.change.error,
+            )
+    except Exception:
+        logger.exception("signal collection failed; continuing, verdict is unaffected in Phase 2")
 
     try:
         verdict = build_verdict(request_id)
