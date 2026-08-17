@@ -14,28 +14,32 @@ Reference implementation for **"Giving Your Pipeline Judgment: An Agentic
 Deployment Gate with Amazon Bedrock"**, AWS Community Day West Africa 2026
 (Lagos, 16–17 October 2026).
 
-> **Status: Phase 1, increment 3 of 3.** No AI anywhere in the system yet, by
-> design — Phase 1 exists to prove the boring deploy path works before a model
-> can be blamed for anything.
+> **Status: Phase 1 complete. Starting Phase 2.** There is still no AI anywhere
+> in the system, by design — Phase 1 existed to prove the deploy path works
+> before a model could be blamed for anything.
 >
-> **Done and verified against real AWS:**
+> **Proven end to end against real AWS:**
 >
 > - Phase 0 groundwork — state bucket, $20/month budget, read-only agent identity
 > - Demo app Lambda, `live` alias, IAM-authenticated function URL
-> - CodeDeploy canary — **observed** shifting traffic between two versions
->   simultaneously, not merely reported as succeeded
-> - Hardcoded halt Lambda holding no deploy permissions, fail-closed on any
->   unrecognised input
+> - **Canary** — observed two versions serving the alias simultaneously while
+>   CodeDeploy shifted traffic. Not merely reported as succeeded; watched.
+> - **Halt** — pipeline set to `halt`/`enforcing` failed at the Gate stage, the
+>   Deploy stage never ran, and the alias did not move.
+> - Full pipeline: GitHub → CodeBuild → Gate → executor → CodeDeploy canary
+>
+> Enforcement today is **structural**: the gate fails the pipeline job and
+> CodePipeline declines to start the next stage. The executor is never consulted,
+> so nothing in it has to be trusted to honour a halt. Verdict-driven *branching*
+> — low risk deploys straight, medium canaries, high halts — is Phase 5.
 >
 > **Outstanding:**
 >
-> - **Increment 3** — CodePipeline + CodeBuild. Blocked on a GitHub repo to use
->   as the pipeline source.
 > - **Bedrock invocation** — blocked on a billing gate, not a permissions one.
 >   The account needs a valid payment instrument before AWS Marketplace will
 >   complete the Anthropic model subscription; promotional credits do not
 >   satisfy it. See [FAILURES.md](FAILURES.md) F-004. Nothing before Phase 3
->   depends on this.
+>   depends on this, so it is not blocking Phase 2.
 
 ---
 

@@ -14,6 +14,18 @@
 
 version: 0.2
 
+env:
+  # Phase 2.2. CodeBuild hands these back to CodePipeline as action output
+  # variables, and the Gate action interpolates them into its UserParameters.
+  #
+  # This is why the gate needs no artifact download, no S3 read and no git
+  # access of its own: the facts travel as pipeline variables. The payload is
+  # base64 precisely so that a commit message containing a quote cannot break
+  # the UserParameters JSON it lands in -- see services/decision_service/
+  # signals/change_context.py for why that matters more than it looks.
+  exported-variables:
+    - CHANGE_CONTEXT_B64
+
 phases:
   install:
     runtime-versions:
@@ -40,6 +52,19 @@ phases:
       - python -m ruff check .
       - python -m ruff format --check .
       - python -m pytest
+
+      # Collect the change context the gate will judge. Deliberately AFTER the
+      # tests: a change that cannot pass its own test suite should never reach
+      # the gate to be assessed on risk.
+      #
+      # `|| true` is intentional and narrow in effect. If this script fails
+      # outright the variable stays empty, CodePipeline interpolates an empty
+      # string, and the collector fails closed on a missing payload -- which
+      # routes to human review. Failing the BUILD instead would be a worse
+      # outcome: a signal-collection bug would block every deploy in the account
+      # rather than degrading one verdict to human judgement.
+      - export CHANGE_CONTEXT_B64="$(python scripts/build_change_context.py || true)"
+      - echo "change context is ${#CHANGE_CONTEXT_B64} base64 chars"
 
 artifacts:
   # The two lines that make the artifact a valid Lambda package. Change these

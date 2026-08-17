@@ -13,6 +13,15 @@ from types import ModuleType
 
 SERVICES = Path(__file__).resolve().parents[1] / "services"
 
+# The signals package is imported normally rather than through `load_handler`,
+# because it is a library rather than a Lambda entrypoint -- there is no
+# `handler.py` name collision to work around (F-005), and `signals` is unique
+# across the repo. Putting its parent on the path once here keeps every test
+# file free of import plumbing.
+_DECISION_SERVICE = str(SERVICES / "decision_service")
+if _DECISION_SERVICE not in sys.path:
+    sys.path.insert(0, _DECISION_SERVICE)
+
 
 def load_handler(service: str) -> ModuleType:
     """Import `services/<service>/handler.py` under a service-qualified name.

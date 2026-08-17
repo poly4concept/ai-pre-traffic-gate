@@ -2,13 +2,18 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "InvokeAnthropicInferenceProfiles",
+      "Sid": "InvokeCandidateVerdictModels",
       "Effect": "Allow",
       "Action": [
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream"
       ],
       "Resource": [
+        "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.amazon.nova-*",
+        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-*",
+        "arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-*",
+        "arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-*",
+        "arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-oss-*",
         "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.anthropic.*",
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.*",
         "arn:aws:bedrock:us-east-2::foundation-model/anthropic.*",

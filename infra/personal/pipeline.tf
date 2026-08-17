@@ -148,6 +148,35 @@ data "aws_iam_policy_document" "codebuild" {
       "${aws_s3_bucket.artifacts.arn}/*",
     ]
   }
+
+  # Required by OutputArtifactFormat = CODEBUILD_CLONE_REF (Phase 2.2).
+  #
+  # With CODE_ZIP, CodeBuild receives a zip and needs no repository access. With
+  # CODEBUILD_CLONE_REF it performs a real `git clone`, and to do that it must
+  # mint a short-lived token from the connection itself.
+  #
+  # This is a read on one specific connection -- it grants the build the ability
+  # to clone the repository it is already building, and nothing else. It does
+  # not widen the boundary described above: still no Lambda, no CodeDeploy, no
+  # infrastructure.
+  #
+  # Both action prefixes are granted deliberately. The service was renamed from
+  # CodeStar Connections to CodeConnections, and which prefix is authorised
+  # depends on internals we do not control. Granting only the current name is
+  # the kind of correct-looking policy that fails at runtime -- exactly the
+  # shape of F-002 and F-007.
+  statement {
+    sid = "CloneViaConnection"
+    actions = [
+      "codeconnections:GetConnectionToken",
+      "codeconnections:GetConnection",
+      "codeconnections:UseConnection",
+      "codestar-connections:GetConnectionToken",
+      "codestar-connections:GetConnection",
+      "codestar-connections:UseConnection",
+    ]
+    resources = [aws_codeconnections_connection.github.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "codebuild" {
@@ -248,6 +277,30 @@ data "aws_iam_policy_document" "executor" {
     resources = [
       "arn:aws:codedeploy:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:deploymentgroup:${aws_codedeploy_app.demo_app.name}/${aws_codedeploy_deployment_group.demo_app.deployment_group_name}",
     ]
+  }
+
+  # One API call, three ARN types. `CreateDeployment` does not only touch the
+  # deployment group: before a deployment can reference an AppSpec, that AppSpec
+  # must be registered as a revision OF THE APPLICATION, which is a separate
+  # resource with a separate ARN.
+  #
+  # The first pipeline run failed here with an AccessDenied naming
+  # RegisterApplicationRevision on the `application:` ARN, while this policy
+  # granted everything on the `deploymentgroup:` ARN and looked complete.
+  # See FAILURES.md F-007.
+  #
+  # GetApplicationRevision is included alongside it because the two are the
+  # revision-lifecycle pair on this resource -- registering a revision you
+  # cannot then read back is not a coherent grant, and it avoids a second
+  # round-trip through a failed pipeline run to discover it. Still scoped to
+  # exactly one application, revision operations only.
+  statement {
+    sid = "RegisterAppSpecRevision"
+    actions = [
+      "codedeploy:RegisterApplicationRevision",
+      "codedeploy:GetApplicationRevision",
+    ]
+    resources = [aws_codedeploy_app.demo_app.arn]
   }
 
   # CreateDeployment validates the named config, which is a separate ARN type
@@ -399,6 +452,12 @@ resource "aws_codepipeline" "main" {
       version          = "1"
       output_artifacts = ["source"]
 
+      # Without a namespace an action's output variables cannot be referenced at
+      # all -- `#{SourceVariables.CommitId}` in a later stage simply fails to
+      # resolve. The console assigns these implicitly, which is why the
+      # requirement is easy to miss when writing the pipeline as code.
+      namespace = "SourceVariables"
+
       configuration = {
         ConnectionArn    = aws_codeconnections_connection.github.arn
         FullRepositoryId = var.github_repository
@@ -406,6 +465,24 @@ resource "aws_codepipeline" "main" {
         # Webhook-driven rather than polled. Polling costs an API call every
         # minute forever and adds up to a minute of latency.
         DetectChanges = true
+
+        # Phase 2.2, and the reason change context is possible at all.
+        #
+        # The default is CODE_ZIP: CodePipeline hands CodeBuild a zip of the
+        # source with NO `.git` directory, so every git command in the build
+        # fails. `git diff` cannot tell you the size of a change it cannot see.
+        #
+        # CODEBUILD_CLONE_REF passes a repository reference instead, and
+        # CodeBuild performs a real clone using the connection. Only CodeBuild
+        # can consume this format -- which is fine here, since the Build stage
+        # is the only consumer of the `source` artifact.
+        #
+        # Unverified until the first run: whether that clone is deep enough for
+        # `HEAD~1` to exist. If it is shallow, `build_change_context.py` reports
+        # `diff_stats_ok: false` with `shallow clone` as the reason rather than
+        # inventing zeros, and the gate degrades to human review. That is the
+        # designed failure, not a surprise.
+        OutputArtifactFormat = "CODEBUILD_CLONE_REF"
       }
     }
   }
@@ -421,6 +498,10 @@ resource "aws_codepipeline" "main" {
       version          = "1"
       input_artifacts  = ["source"]
       output_artifacts = ["package"]
+
+      # Exposes CHANGE_CONTEXT_B64, declared in buildspec.yml's
+      # `exported-variables`, as `#{BuildVariables.CHANGE_CONTEXT_B64}`.
+      namespace = "BuildVariables"
 
       configuration = {
         ProjectName = aws_codebuild_project.demo_app.name
@@ -446,6 +527,39 @@ resource "aws_codepipeline" "main" {
 
       configuration = {
         FunctionName = aws_lambda_function.gate_stub.function_name
+
+        # Phase 2.2 -- how the gate learns what it is judging.
+        #
+        # Two values, from two sources with different trust properties, and the
+        # whole shape of this string is a security decision:
+        #
+        #   trusted_commit_sha   CodePipeline read this off the source
+        #                        connection. No repository file was involved, so
+        #                        a commit cannot influence it.
+        #   change_context_b64   produced by buildspec.yml, which lives in the
+        #                        repository being judged. Self-reported.
+        #
+        # The gate cross-checks one against the other and refuses to proceed if
+        # they disagree -- catching a build that describes a different commit
+        # than the one CodePipeline sourced.
+        #
+        # BOTH interpolated values are structurally safe: a git SHA is hex, and
+        # base64 is alphanumeric plus `+/=`. Neither can contain a double quote,
+        # so neither can terminate this JSON string early.
+        #
+        # That constraint is not decoration. Interpolating
+        # `#{SourceVariables.CommitMessage}` directly here -- the obvious
+        # implementation -- breaks the gate the first time somebody writes a
+        # commit message containing a quote. Attacker-influenced text reaches
+        # this config format long before it reaches any model.
+        #
+        # Hard limit of 1000 characters, enforced on both sides: the build trims
+        # its payload to fit, and the collector rejects anything oversized as
+        # probably truncated.
+        UserParameters = jsonencode({
+          trusted_commit_sha = "#{SourceVariables.CommitId}"
+          change_context_b64 = "#{BuildVariables.CHANGE_CONTEXT_B64}"
+        })
       }
     }
   }

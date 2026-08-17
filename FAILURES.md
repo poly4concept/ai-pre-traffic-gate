@@ -129,11 +129,16 @@ with a different error:
 | 2 | Marketplace IAM | Can the caller perform `aws-marketplace:Subscribe`? | `AccessDeniedException` |
 | 3 | Billing | Does the account have a valid payment instrument? | `AccessDeniedException` |
 | 4 | Bedrock IAM | Does the principal have `bedrock:InvokeModel` on the right ARNs? | `AccessDeniedException` |
-| 5 | Request | Is the model ID valid and invokable in this region? | `ValidationException` |
+| 5 | Quota | Does the account have a non-zero daily token allowance? | `ThrottlingException` |
+| 6 | Request | Is the model ID valid and invokable in this region? | `ValidationException` |
 
-Five gates, three error codes, and **three different gates share
+Six gates, four error codes, and **three different gates share
 `AccessDeniedException`** — the code cannot distinguish them. Only the message
 can, and the message is prose that AWS is free to reword.
+
+Gate 5 was discovered later, in Phase 2, while trying to route around gate 3 by
+switching to Amazon's own models. See F-009: it is zero and non-adjustable on an
+account with no payment instrument, for every model from every provider.
 
 They must be cleared in order, and each is invisible until the one before it is
 satisfied. Clearing the use case form did not produce success; it produced a
@@ -303,7 +308,70 @@ default and running a bare `terraform apply`.
 
 ---
 
-## F-006 — A partial apply, caused by DNS, that looked like a permissions problem
+## F-007 — One API call, three ARN types: an IAM policy that looked complete
+
+**Phase:** 1, increment 3
+
+**Symptom:** the first pipeline run reached the Deploy stage and failed there.
+Source, Build and Gate all succeeded.
+
+```text
+AccessDeniedException: User: .../ai-pre-traffic-gate-executor is not authorized
+to perform: codedeploy:RegisterApplicationRevision on resource:
+arn:aws:codedeploy:us-east-1:594380318102:application:ai-pre-traffic-gate-demo-app
+```
+
+**What happened:** the executor's policy was written by asking "what resource am
+I acting on?" The answer seemed obviously *the deployment group* — that is what
+`CreateDeployment` names in its arguments. So the policy granted
+`codedeploy:CreateDeployment` and `GetDeployment` on the `deploymentgroup:` ARN,
+plus `GetDeploymentConfig` on the `deploymentconfig:` ARN, and looked thorough.
+
+But `CreateDeployment` with an inline AppSpec spans **three** resource types.
+Before a deployment can reference an AppSpec, that AppSpec must be registered as
+a *revision of the application*, which is a separate resource with its own ARN:
+
+| Action | ARN type | Was granted |
+| --- | --- | --- |
+| `CreateDeployment` | `deploymentgroup:` | yes |
+| `GetDeploymentConfig` | `deploymentconfig:` | yes |
+| `RegisterApplicationRevision` | `application:` | **no** |
+
+**Fix:** added `RegisterApplicationRevision` and `GetApplicationRevision` on the
+application ARN. Still one application, revision operations only.
+
+**Lessons:**
+
+1. **A single API call is not a single authorisation.** Deriving a policy from
+   the resource named in the call's arguments is a reasonable-sounding heuristic
+   that fails whenever the service does internal work on adjacent resources.
+   The reliable method is to attempt the call and read what is denied, which is
+   an argument for exercising a least-privilege policy end to end rather than
+   reviewing it.
+2. **Read the resource in the error, not just the action.** This is now the
+   third time in this project the message named the answer exactly and the
+   temptation was to look elsewhere: F-001 (the account ID in the ARN was wrong),
+   F-004 (the code said `ResourceNotFound`, the message said "use case form"),
+   and here (`application:` where the policy said `deploymentgroup:`). AWS
+   AccessDenied messages are unusually precise — they state the principal, the
+   action, and the exact resource ARN. All three failures were diagnosable from
+   the text alone.
+3. **The failure landed in the right place, which is the encouraging part.** The
+   executor caught the `ClientError`, reported `PutJobFailureResult`, and the
+   pipeline stopped at Deploy with the reason visible. The alias never moved. A
+   permissions gap in the component holding deploy permissions produced a clean
+   halt rather than a partial deployment — which is what the fail-closed design
+   in D-014 is for, tested here by accident on a real failure rather than by a
+   unit test.
+4. **Least-privilege policies are built iteratively, and that is normal.** The
+   alternative is a wildcard that never fails and never protects anything. Each
+   round trip costs a pipeline run; each one also documents precisely why a
+   permission is present. Worth saying out loud in the talk, because the usual
+   reason people ship `codedeploy:*` is that the iteration felt like failure.
+
+---
+
+## F-008 — A partial apply, caused by DNS, that looked like a permissions problem
 
 **Phase:** 1, increment 2
 
@@ -391,3 +459,74 @@ generic branch, which is unhelpful rather than misleading. Choosing *which way
 a detector fails* is a design decision, and it is the same one the verdict
 layer faces in Phase 3 — an ambiguous signal must degrade toward "I do not
 know", never toward a confident wrong answer.
+
+---
+
+## F-009 — Switching to Amazon's own models did not avoid the payment gate
+
+**Phase:** 2
+
+**The hypothesis, which was reasonable:** Anthropic models are third-party and
+delivered through AWS Marketplace, which is what drags in the subscription and
+the `INVALID_PAYMENT_INSTRUMENT` failure of F-004. Amazon Nova is AWS's own
+first-party model and should not touch Marketplace at all. So develop on Nova,
+defer the card until Phase 4, and compare models later — which CLAUDE.md
+already wanted anyway.
+
+**Half of that turned out to be true.** Nova did get past the Marketplace gate.
+The error changed from `AccessDeniedException` about Marketplace subscriptions
+to something entirely different:
+
+```text
+ThrottlingException: Too many tokens per day, please wait before trying again.
+```
+
+That is a *quota*, not a permission and not a subscription — which means the
+call reached the actual inference path. Progress, and it confirmed the
+first-party reasoning.
+
+**But the same error appeared for every model tested**, across three providers
+and both invocation styles:
+
+| Model | Result |
+| --- | --- |
+| `us.amazon.nova-micro-v1:0` | `ThrottlingException: Too many tokens per day` |
+| `us.amazon.nova-lite-v1:0` | `ThrottlingException: Too many tokens per day` |
+| `us.amazon.nova-pro-v1:0` | `ThrottlingException: Too many tokens per day` |
+| `openai.gpt-oss-20b-1:0` | `ThrottlingException: Too many tokens per day` |
+
+Account-wide, not per-model. Service Quotas gave the reason:
+
+```text
+Model invocation max tokens per day for Amazon Nova Pro ......... 0.0  Adjustable: False
+Model invocation max tokens per day for Anthropic Claude Opus 4.5  0.0  Adjustable: False
+Model invocation max tokens per day for GPT OSS Safeguard 20B .... 0.0  Adjustable: False
+```
+
+**Every daily token quota is zero, for every model, and none of them are
+adjustable.** A support request cannot raise them. The account has no Bedrock
+token allowance at all.
+
+**Conclusion:** the payment instrument is not a Marketplace-specific
+requirement that model choice can route around. It gates Bedrock inference
+account-wide. Nova avoids one symptom of it and not the cause.
+
+**Lessons:**
+
+1. **The hypothesis was right about mechanism and wrong about consequence.**
+   Nova genuinely does bypass the Marketplace subscription path — that part was
+   correctly reasoned. It simply did not matter, because a second, unrelated
+   restriction sat behind it. Being right about the mechanism is not the same as
+   being right about the outcome, and only running the call distinguishes them.
+2. **A changed error message is evidence of progress, not of success.** Watching
+   the failure move from `AccessDenied/Marketplace` to `Throttling/quota` was the
+   thing that proved the first-party reasoning held. Errors are a signal about
+   *where you are in the stack*, and treating them only as noise discards that.
+3. **Service Quotas answered in one call what four invocations only implied.**
+   The invocations showed the same symptom four times; the quota listing showed
+   `0.0 / Adjustable: False` and ended the question. When something looks
+   account-wide, ask the account-wide API.
+4. **This is now gate 6 in F-004's ladder**, and the second one that no amount of
+   IAM or code can clear. Two of the six barriers between this project and a
+   model response are commercial rather than technical, and both surface through
+   error codes that describe something else.
