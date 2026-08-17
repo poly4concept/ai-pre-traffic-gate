@@ -227,7 +227,10 @@ def pipeline_event(payload_overrides: dict | None = None, trusted_sha: str = SHA
 def test_gate_collects_real_change_context_from_a_pipeline_event(monkeypatch):
     handler = load(monkeypatch, "allow", "shadow")
 
-    bundle = handler.collect_bundle(pipeline_event())
+    bundle = handler.collect_bundle(
+        pipeline_event(),
+        security_collector=handler.DisabledCollector("security_findings", "not under test"),
+    )
 
     assert bundle.change.status is SignalStatus.OK
     assert bundle.change.data.commit_sha == SHA
@@ -241,16 +244,21 @@ def test_unimplemented_collectors_are_skipped_not_mocked(monkeypatch):
     SKIPPED is the honest status for a collector that does not exist yet. This is
     the distinction the whole signals package turns on, applied to our own
     unfinished work rather than to an AWS outage.
+
+    Security is no longer in that category -- Phase 2.3 gave it a real collector,
+    so it is injected here as SKIPPED to keep this test about target health.
     """
     handler = load(monkeypatch, "allow", "shadow")
 
-    bundle = handler.collect_bundle(pipeline_event())
+    bundle = handler.collect_bundle(
+        pipeline_event(),
+        security_collector=handler.DisabledCollector("security_findings", "not under test"),
+    )
 
-    assert bundle.security.status is SignalStatus.SKIPPED
-    assert bundle.security.data is None
     assert bundle.health.status is SignalStatus.SKIPPED
+    assert bundle.health.data is None
     # Skipped is missing, but it is not a failure -- nobody should be paged.
-    assert set(bundle.missing) == {"security_findings", "target_health"}
+    assert "target_health" in bundle.missing
     assert bundle.failed == ()
 
 
@@ -258,7 +266,10 @@ def test_a_direct_invoke_has_no_change_to_describe(monkeypatch):
     """Invoked by hand, outside any pipeline. There is no change context."""
     handler = load(monkeypatch, "allow", "shadow")
 
-    bundle = handler.collect_bundle({})
+    bundle = handler.collect_bundle(
+        {},
+        security_collector=handler.DisabledCollector("security_findings", "not under test"),
+    )
 
     assert bundle.change.status is SignalStatus.UNAVAILABLE
     assert not bundle.has_required_signals
@@ -267,7 +278,10 @@ def test_a_direct_invoke_has_no_change_to_describe(monkeypatch):
 def test_a_tampered_payload_yields_no_change_context(monkeypatch):
     handler = load(monkeypatch, "allow", "shadow")
 
-    bundle = handler.collect_bundle(pipeline_event(trusted_sha="f" * 40))
+    bundle = handler.collect_bundle(
+        pipeline_event(trusted_sha="f" * 40),
+        security_collector=handler.DisabledCollector("security_findings", "not under test"),
+    )
 
     assert bundle.change.status is SignalStatus.UNAVAILABLE
     assert "mismatch" in bundle.change.error
@@ -276,11 +290,14 @@ def test_a_tampered_payload_yields_no_change_context(monkeypatch):
 def test_the_bundle_is_json_serialisable_for_the_audit_log(monkeypatch):
     handler = load(monkeypatch, "allow", "shadow")
 
-    payload = handler.collect_bundle(pipeline_event()).to_dict()
+    payload = handler.collect_bundle(
+        pipeline_event(),
+        security_collector=handler.DisabledCollector("security_findings", "not under test"),
+    ).to_dict()
 
     json.dumps(payload)  # raises if a datetime or Enum survived
     assert payload["signals"]["change_context"]["status"] == "ok"
-    assert payload["signals"]["security_findings"]["status"] == "skipped"
+    assert payload["signals"]["target_health"]["status"] == "skipped"
 
 
 # --- Collection must not be able to break the gate ------------------------
@@ -328,3 +345,87 @@ def test_the_halt_path_still_works_with_signals_present(monkeypatch):
 
     assert verdict["action_taken"] == "halt_pipeline"
     assert reported and reported[0]["decision"] == "halt"
+
+
+# --- Inspector wiring (Phase 2.3) ----------------------------------------
+
+
+def load_with_env(monkeypatch, **env):
+    """Load the handler with arbitrary env, since values are read at import."""
+    monkeypatch.setenv("GATE_DECISION", "allow")
+    monkeypatch.setenv("GATE_MODE", "shadow")
+    for k, v in env.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+    return load_handler("decision_service")
+
+
+def test_security_scanning_on_selects_the_real_inspector_collector(monkeypatch):
+    handler = load_with_env(monkeypatch, SECURITY_SCANNING="true")
+
+    assert handler.SECURITY_SCANNING is True
+
+
+def test_security_scanning_off_yields_skipped_not_a_fake_clean_result(monkeypatch):
+    """Declining to pay for Inspector is a choice, not a clean bill of health."""
+    handler = load_with_env(monkeypatch, SECURITY_SCANNING="false")
+
+    bundle = handler.collect_bundle(pipeline_event())
+
+    assert bundle.security.status is SignalStatus.SKIPPED
+    assert bundle.security.data is None
+    assert "deliberately not consulted" in bundle.security.error
+
+
+def test_security_scanning_defaults_to_on(monkeypatch):
+    """Absent config must not silently disable a security signal."""
+    handler = load_with_env(monkeypatch, SECURITY_SCANNING=None)
+
+    assert handler.SECURITY_SCANNING is True
+
+
+def test_a_disabled_inspector_reports_unavailable_through_the_gate(monkeypatch):
+    """End to end: Inspector off, and the bundle says so rather than 'clean'.
+
+    This is the state of the real account right now, so it is the behaviour the
+    next deployment will actually exhibit.
+    """
+    handler = load_with_env(monkeypatch, SECURITY_SCANNING="true")
+
+    class DisabledInspector:
+        def batch_get_account_status(self, **_):
+            return {
+                "accounts": [
+                    {
+                        "accountId": "594380318102",
+                        "state": {"status": "DISABLED"},
+                        "resourceState": {"lambda": {"status": "DISABLED"}},
+                    }
+                ]
+            }
+
+    collector = handler.InspectorFindingsCollector("svc", client=DisabledInspector())
+    result = collector.collect()
+
+    assert result.status is SignalStatus.UNAVAILABLE
+    assert result.data is None
+    assert "DISABLED" in result.error
+
+
+def test_inspector_failure_does_not_block_the_bundle(monkeypatch):
+    """A broken security collector must still leave change context usable."""
+    handler = load_with_env(monkeypatch, SECURITY_SCANNING="true")
+    monkeypatch.setattr(
+        handler,
+        "InspectorFindingsCollector",
+        lambda *a, **k: handler.MockChangeContextCollector(raises=RuntimeError("boom")),
+    )
+
+    bundle = handler.collect_bundle(pipeline_event())
+
+    assert bundle.change.is_usable
+    assert bundle.security.status is SignalStatus.UNAVAILABLE
+    # Two of three collected, and a verdict is still permitted.
+    assert bundle.has_required_signals

@@ -326,3 +326,32 @@ def test_scenario_set_spans_the_risk_space():
     healths = [s["health"] for s in sc.SCENARIOS.values()]
     assert any(h.has_active_alarm for h in healths)
     assert any(h.is_low_traffic for h in healths)
+
+
+# --- The offline guard ----------------------------------------------------
+
+
+def test_the_suite_cannot_make_a_real_aws_call():
+    """Tests the test infrastructure, deliberately.
+
+    The autouse `_no_real_aws` fixture in conftest silently protects every test in
+    the suite, and a guard nobody verifies is not a guard (FAILURES.md F-003).
+    Before it existed, Phase 2.3 quietly started calling Inspector for real and
+    the suite went from 2 seconds to 88.
+    """
+    import boto3
+
+    with pytest.raises(RuntimeError, match="tried to create a real boto3 client"):
+        boto3.client("inspector2")
+
+
+def test_the_real_inspector_collector_stays_offline_in_tests():
+    """A collector built without a client must not reach AWS from the suite."""
+    from signals import InspectorFindingsCollector
+
+    result = InspectorFindingsCollector("some-function").collect()
+
+    # Blocked by the guard, absorbed by the fail-closed handler, reported as
+    # unavailable. Never as "no findings".
+    assert result.status is SignalStatus.UNAVAILABLE
+    assert result.data is None

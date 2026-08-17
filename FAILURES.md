@@ -530,3 +530,127 @@ account-wide. Nova avoids one symptom of it and not the cause.
    IAM or code can clear. Two of the six barriers between this project and a
    model response are commercial rather than technical, and both surface through
    error codes that describe something else.
+
+---
+
+## F-010 — Amazon Inspector reports "no vulnerabilities" for a service it has never scanned
+
+**Phase:** 2.3
+
+**Symptom:** none. That is the entire problem.
+
+```text
+$ aws inspector2 list-findings
+{ "findings": [] }
+```
+
+No error. No warning. An empty list — the identical response a thoroughly
+scanned, genuinely clean resource produces.
+
+**The actual state of the account:**
+
+```text
+$ aws inspector2 batch-get-account-status
+594380318102   DISABLED   lambda: DISABLED   lambdaCode: DISABLED   ecr: DISABLED
+```
+
+Amazon Inspector had never been switched on. Not misconfigured, not mid-scan —
+disabled entirely. And the API for "show me the vulnerabilities in this account"
+answered "there are none".
+
+**Why this is the most dangerous instance of the absent-versus-negative rule.**
+The naive collector is three lines:
+
+```python
+def _collect(self):
+    resp = client.list_findings(filterCriteria=...)
+    return SecurityFindings(findings=tuple(parse(f) for f in resp["findings"]))
+```
+
+It is obviously correct, passes review, and reports that a service nobody has
+ever scanned has zero known vulnerabilities. The verdict layer then has positive
+evidence of safety where it should have none.
+
+Worse than having no security signal at all: **"no signal" prompts a question,
+"no findings" closes it.** A gate with a missing collector gets fixed. A gate
+confidently reporting a clean scan does not.
+
+**Fix:** three calls, in order, and the first two are not optional:
+
+| Step | Call | Establishes |
+| --- | --- | --- |
+| 1 | `BatchGetAccountStatus` | Inspector is enabled **and** Lambda scanning is on |
+| 2 | `ListCoverage` | *this* function is covered and actively scanned |
+| 3 | `ListFindings` | only now does an empty list mean "clean" |
+
+Any of those failing yields `UNAVAILABLE` with a reason, never zero. There is a
+test asserting that `list_findings` is not even *called* when the guard fails —
+because a collector that asks the question before it has earned the right to
+interpret the answer is one refactor away from using it.
+
+**Two separate switches, not one.** Inspector can be `ENABLED` for an account
+while Lambda scanning specifically is `DISABLED`. Checking only the account
+status would have looked thorough and caught nothing.
+
+**Lessons:**
+
+1. **An API that returns a collection will return an empty collection for
+   reasons that have nothing to do with your question.** Not scanned, no
+   permission, wrong filter, wrong region, feature disabled — all render as
+   `[]`. Before trusting emptiness, establish that somebody was looking.
+2. This was found by *running the call against a real account*, not by reading
+   the API reference — which documents the response shape perfectly and says
+   nothing about what an empty list means. Third time this project has been
+   saved by that habit (F-002, F-004, F-010).
+3. The naive version is shorter, reads better, and would survive code review.
+   Defensive code that looks like over-engineering is sometimes just code
+   written by someone who has seen the failure.
+
+---
+
+## F-011 — The test suite quietly started calling AWS for real
+
+**Phase:** 2.3
+
+**Symptom:** the suite's runtime went from **2 seconds to 88 seconds**, and two
+tests failed with genuine `InspectorNotEnabledError` traces from the live
+account.
+
+**What happened:** wiring the real Inspector collector into the gate meant
+`collect_bundle()` constructed `InspectorFindingsCollector(SERVICE_NAME)` with no
+client argument. The collector builds its boto3 client lazily — so every test
+that exercised the gate handler silently made three live Inspector API calls.
+
+**Why the slowness was the least of it.** CLAUDE.md constraint 5 requires the
+whole flow to run with zero real AWS dependencies. Tests that reach AWS:
+
+- depend on credentials, so they fail in CI and pass on a laptop;
+- depend on live account state, so enabling Inspector later would have *changed
+  test outcomes* without a line of code changing;
+- can pass for entirely the wrong reason.
+
+The 88 seconds was the only visible symptom of all three.
+
+**Fix:** two changes, one structural and one design.
+
+1. An autouse fixture in `conftest.py` replaces `boto3.client` and
+   `boto3.resource` with a function that raises, unless a test is marked
+   `@pytest.mark.aws`. The offline constraint is now enforced rather than
+   intended, and a test asserts the guard itself works — a guard nobody verifies
+   is not a guard (F-003).
+2. `collect_bundle()` now accepts injected collectors, defaulting to the real
+   ones. Same dependency-injection discipline `collect_signals()` already used
+   one level down. Production and test run identical code with no `is_mock`
+   branch inside it.
+
+**Lessons:**
+
+1. **Lazy client construction hides where the network calls are.** It is the
+   right pattern for import-time testability, and it makes "does this code touch
+   AWS?" invisible at the call site. Those are the same property.
+2. Performance regressions in a test suite are worth investigating rather than
+   tolerating. An 88-second suite is annoying; the reason it was 88 seconds was
+   a correctness problem.
+3. Dependency injection stopped being a style preference at exactly the moment a
+   collector grew a network dependency. The pattern was already there one layer
+   down and had not been carried up.

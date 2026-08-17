@@ -122,6 +122,27 @@ variable "gate_decision" {
   }
 }
 
+# Amazon Inspector bills per scanned function per hour, so this is the one
+# signal collector whose existence costs money whether or not a deploy happens.
+# Verified from the AWS Price List API (us-east-1, August 2026):
+#
+#   Lambda standard scanning (dependencies)   $0.00042/hour  ~= $0.31/month
+#   Lambda code scanning (application logic)  $0.00084/hour  ~= $0.61/month
+#
+# Standard scanning only is the intended configuration. Phase 2.5 synthesises
+# vulnerable *dependencies*, which is exactly what standard scanning finds, and
+# CLAUDE.md forbids deliberately exploitable application logic -- so code
+# scanning would cost double to find nothing by design.
+#
+# Setting this false makes the security signal SKIPPED rather than UNAVAILABLE:
+# "we chose not to look" is a different statement from "we looked and could not
+# tell", and neither may be read as "nothing wrong".
+variable "security_scanning" {
+  description = "Whether the gate consults Amazon Inspector. Requires Inspector to be enabled."
+  type        = bool
+  default     = true
+}
+
 variable "gate_mode" {
   description = "Operating mode of the deployment gate: shadow | advisory | enforcing."
   type        = string

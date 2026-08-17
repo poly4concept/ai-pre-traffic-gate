@@ -85,6 +85,28 @@ data "aws_iam_policy_document" "gate_stub" {
     ]
     resources = ["*"]
   }
+
+  # Phase 2.3 -- read-only Amazon Inspector access.
+  #
+  # Three calls, and all three are load-bearing rather than two of them being
+  # convenience. ListFindings alone returns an empty list for a resource nobody
+  # has ever scanned, which is indistinguishable from a clean bill of health.
+  # BatchGetAccountStatus and ListCoverage are what establish that somebody was
+  # actually looking before an empty list is allowed to mean anything.
+  #
+  # `*` because inspector2 does not support resource-level permissions on these
+  # actions -- there is no narrower ARN to name. Every one of them is a read;
+  # none can enable Inspector, suppress a finding, or alter its configuration,
+  # so the gate still cannot change the state of anything.
+  statement {
+    sid = "ReadInspectorFindings"
+    actions = [
+      "inspector2:BatchGetAccountStatus",
+      "inspector2:ListCoverage",
+      "inspector2:ListFindings",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "gate_stub" {
@@ -122,6 +144,19 @@ resource "aws_lambda_function" "gate_stub" {
     variables = {
       GATE_DECISION = var.gate_decision
       GATE_MODE     = var.gate_mode
+
+      # Which service the gate is judging a deploy TO. Inspector findings and
+      # (from 2.4) CloudWatch metrics are both scoped to this name. Passed in
+      # rather than hardcoded in the handler so the gate can later front more
+      # than one service without a code change.
+      TARGET_SERVICE = local.demo_app_name
+
+      # Amazon Inspector carries a standing per-function charge, so declining to
+      # enable it is a legitimate choice rather than a misconfiguration. false
+      # yields a SKIPPED signal ("we chose not to look"); true runs the real
+      # collector, which reports UNAVAILABLE with a reason while Inspector is
+      # switched off -- never a fabricated clean result.
+      SECURITY_SCANNING = tostring(var.security_scanning)
     }
   }
 

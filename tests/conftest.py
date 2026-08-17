@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 SERVICES = Path(__file__).resolve().parents[1] / "services"
 
 # The signals package is imported normally rather than through `load_handler`,
@@ -21,6 +23,38 @@ SERVICES = Path(__file__).resolve().parents[1] / "services"
 _DECISION_SERVICE = str(SERVICES / "decision_service")
 if _DECISION_SERVICE not in sys.path:
     sys.path.insert(0, _DECISION_SERVICE)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_aws(request, monkeypatch):
+    """Make a real AWS call impossible unless a test explicitly asks for one.
+
+    CLAUDE.md constraint 5 requires the suite to run end to end with zero real
+    AWS dependencies. That was true by construction until Phase 2.3, when the
+    gate began building a real Inspector client by default -- at which point the
+    suite quietly started calling AWS and its runtime went from 2 seconds to 88.
+
+    Slowness was the *symptom*. The real problems are that tests then depend on
+    credentials, on network, and on live account state -- so they would pass on
+    this laptop and fail in CI, or worse, pass for the wrong reason.
+
+    Opt out with `@pytest.mark.aws` for a test that genuinely intends to talk to
+    AWS. There are none today.
+    """
+    if "aws" in request.keywords:
+        return
+
+    import boto3
+
+    def blocked(*args, **kwargs):
+        service = args[0] if args else kwargs.get("service_name", "?")
+        raise RuntimeError(
+            f"test tried to create a real boto3 client for {service!r}. "
+            "Inject a fake client, or mark the test with @pytest.mark.aws."
+        )
+
+    monkeypatch.setattr(boto3, "client", blocked)
+    monkeypatch.setattr(boto3, "resource", blocked)
 
 
 def load_handler(service: str) -> ModuleType:

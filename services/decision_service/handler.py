@@ -41,6 +41,7 @@ from typing import Any
 
 from signals import (
     DisabledCollector,
+    InspectorFindingsCollector,
     MockChangeContextCollector,
     PipelineChangeContextCollector,
     collect_signals,
@@ -179,8 +180,19 @@ def report_to_codepipeline(job: dict[str, Any], verdict: dict[str, Any]) -> None
 
 SERVICE_NAME = os.environ.get("TARGET_SERVICE", "ai-pre-traffic-gate-demo-app")
 
+# Amazon Inspector carries a standing per-function cost, so not enabling it is a
+# legitimate choice rather than a misconfiguration. This toggle distinguishes the
+# two: false means SKIPPED ("we chose not to look"), true means the real
+# collector runs and reports honestly -- which, while Inspector is switched off,
+# means UNAVAILABLE with a reason rather than a fabricated clean result.
+SECURITY_SCANNING = os.environ.get("SECURITY_SCANNING", "true").strip().lower() != "false"
 
-def collect_bundle(event: dict[str, Any]) -> Any:
+
+def collect_bundle(
+    event: dict[str, Any],
+    security_collector: Any = None,
+    health_collector: Any = None,
+) -> Any:
     """Collect the signal bundle. Phase 2 -- logged, and acted on by nothing.
 
     Deliberately does NOT influence the verdict yet. Phase 2's job is to produce
@@ -189,7 +201,7 @@ def collect_bundle(event: dict[str, Any]) -> Any:
     when the model arrives we already know the signals are real -- the same
     reason Phase 1 built the deploy path before any AI touched it.
 
-    Security findings and target health use DisabledCollector rather than mocks.
+    Target health still uses DisabledCollector rather than a mock.
     That matters: a mock here would put fabricated health data into the audit
     trail of a real deployment, which is exactly the "absent signal read as a
     reassuring one" failure the whole package exists to prevent. SKIPPED is the
@@ -205,13 +217,29 @@ def collect_bundle(event: dict[str, Any]) -> Any:
         # pretending a change exists.
         change_collector = MockChangeContextCollector()
 
+    # Injectable, defaulting to the real thing. Same discipline as
+    # `collect_signals` one level down: the production path and the test path run
+    # identical code, with no `is_mock` branch anywhere inside it. It also keeps
+    # the test suite offline -- constructing InspectorFindingsCollector here with
+    # no client builds a real boto3 client, which is how the suite briefly
+    # started calling AWS for real.
+    if security_collector is None:
+        if SECURITY_SCANNING:
+            security_collector = InspectorFindingsCollector(SERVICE_NAME)
+        else:
+            security_collector = DisabledCollector(
+                "security_findings",
+                "SECURITY_SCANNING is false; Inspector deliberately not consulted",
+            )
+
+    if health_collector is None:
+        health_collector = DisabledCollector("target_health", "not implemented until Phase 2.4")
+
     return collect_signals(
         target=DeploymentTarget(service_name=SERVICE_NAME),
         change_collector=change_collector,
-        security_collector=DisabledCollector(
-            "security_findings", "not implemented until Phase 2.3"
-        ),
-        health_collector=DisabledCollector("target_health", "not implemented until Phase 2.4"),
+        security_collector=security_collector,
+        health_collector=health_collector,
     )
 
 

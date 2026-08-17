@@ -56,6 +56,31 @@ class SignalStatus(StrEnum):
     read as an incident."""
 
 
+class PartialSignal(Exception):  # noqa: N818
+    """Raised by a collector that obtained data but knows it is incomplete.
+
+    Phase 2.3. Until now `DEGRADED` existed as a status with nothing able to
+    produce it -- `_collect()` either returned data (OK) or raised (UNAVAILABLE).
+    Real collectors need a third option: Inspector can return 400 findings when
+    only the first 50 fit in a prompt, and discarding all of them would be as
+    dishonest as pretending the list was complete.
+
+    Raised rather than returned so `_collect()` keeps a single simple signature.
+    The base class converts it to a DEGRADED result carrying both the data and
+    the reason it is partial.
+
+    Named without the `Error` suffix on purpose (hence the lint suppression):
+    this is not a failure. It is a successful collection that knows its own
+    limits, which is a different thing and should not read as an error at the
+    call site.
+    """
+
+    def __init__(self, data: object, reason: str) -> None:
+        super().__init__(reason)
+        self.data = data
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class SignalResult[T]:
     """A signal, or an honest account of why there isn't one."""
@@ -114,6 +139,18 @@ class SignalCollector[T](ABC):
         started = time.perf_counter()
         try:
             data = self._collect()
+        except PartialSignal as partial:
+            # Caught BEFORE the generic handler, or incomplete-but-real data
+            # would be thrown away and reported as nothing collected.
+            duration_ms = (time.perf_counter() - started) * 1000
+            logger.info("collector %s returned partial data: %s", self.name, partial.reason)
+            return SignalResult(
+                collector=self.name,
+                status=SignalStatus.DEGRADED,
+                data=partial.data,  # type: ignore[arg-type]
+                error=partial.reason,
+                duration_ms=duration_ms,
+            )
         except Exception as exc:
             duration_ms = (time.perf_counter() - started) * 1000
             # Deliberately broad. A collector raising something unanticipated is

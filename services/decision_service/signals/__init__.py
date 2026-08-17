@@ -14,7 +14,13 @@ Start with `base.py`. The single idea holding the package together is that an
 absent signal must never be mistaken for a reassuring one.
 """
 
-from .base import DisabledCollector, SignalCollector, SignalResult, SignalStatus
+from .base import (
+    DisabledCollector,
+    PartialSignal,
+    SignalCollector,
+    SignalResult,
+    SignalStatus,
+)
 from .bundle import REQUIRED_SIGNALS, SignalBundle, collect_signals
 from .change_context import (
     PipelineChangeContextCollector,
@@ -29,6 +35,12 @@ from .collectors import (
     MockTargetHealthCollector,
     SecurityFindingsCollector,
     TargetHealthCollector,
+)
+from .inspector import (
+    InspectorFindingsCollector,
+    InspectorNotEnabledError,
+    ResourceNotCoveredError,
+    normalise_finding,
 )
 from .types import (
     Alarm,
@@ -49,11 +61,15 @@ __all__ = [
     "DeploymentTarget",
     "DisabledCollector",
     "MockChangeContextCollector",
+    "InspectorFindingsCollector",
+    "InspectorNotEnabledError",
     "MockSecurityFindingsCollector",
     "MockTargetHealthCollector",
+    "PartialSignal",
     "PipelineChangeContextCollector",
     "PipelineEventError",
     "Provenance",
+    "ResourceNotCoveredError",
     "SecurityFinding",
     "SecurityFindings",
     "SecurityFindingsCollector",
@@ -66,5 +82,6 @@ __all__ = [
     "TargetHealthCollector",
     "collect_signals",
     "decode_payload",
+    "normalise_finding",
     "extract_user_parameters",
 ]

@@ -71,6 +71,23 @@ class Severity(StrEnum):
     LOW = "low"
     INFORMATIONAL = "informational"
 
+    UNKNOWN = "unknown"
+    """Severity could not be determined.
+
+    Phase 2.3. Amazon Inspector emits `UNTRIAGED` for findings it has not yet
+    scored, and may add severity values we have never seen. Neither can be
+    mapped to a number.
+
+    The temptation is to fold those into LOW or INFORMATIONAL, which is quiet
+    and wrong -- an unscored critical vulnerability would vanish into the noise
+    floor. Mapping them upward to CRITICAL is equally wrong and would make the
+    gate cry wolf. So they get their own value and stay visible: a bundle
+    reporting "3 critical, 1 unknown" is telling the truth, where one reporting
+    "3 critical, 1 low" is not.
+
+    Same rule as everything else here -- do not let something you could not
+    determine masquerade as something reassuring."""
+
 
 @dataclass(frozen=True)
 class SecurityFinding:
@@ -179,6 +196,32 @@ class SecurityFindings:
     findings: tuple[SecurityFinding, ...] = ()
     scanned_at: datetime | None = None
     scanner: str = "unknown"
+
+    # What was actually scanned, e.g. "ai-pre-traffic-gate-demo-app:4".
+    scan_target: str = ""
+
+    # THE CAVEAT THAT MAKES THIS SIGNAL HONEST, and it is a big one.
+    #
+    # Amazon Inspector scans *deployed* resources. The gate runs *before* the
+    # deploy. So findings collected at gate time describe the version currently
+    # live, NOT the candidate about to replace it.
+    #
+    # That means the obvious signal source answers a subtly different question
+    # than the one asked. "Is this change safe?" is not what Inspector is
+    # reporting on; "is the thing this change would replace currently known to
+    # be vulnerable?" is. Still useful -- deploying into a service with active
+    # criticals is real context, and a change that fixes them is a point in its
+    # favour -- but it is not vulnerability data about the new code.
+    #
+    # Scanning the candidate artifact requires a different mechanism entirely
+    # (an SBOM generated in the build and scanned before deploy). Recorded as a
+    # flag rather than a comment so the verdict layer and the audit record can
+    # both see which question was answered.
+    is_candidate_artifact: bool = False
+
+    @property
+    def unknown_count(self) -> int:
+        return self.count_by_severity(Severity.UNKNOWN)
 
     def count_by_severity(self, severity: Severity) -> int:
         return sum(1 for f in self.findings if f.severity is severity)

@@ -499,6 +499,150 @@ findings on its own.
 
 ---
 
+## D-021 — An empty findings list is not evidence until coverage is established
+
+**Decision:** `InspectorFindingsCollector` makes three API calls in a fixed
+order, and refuses to interpret an empty findings list until the first two have
+passed.
+
+```text
+BatchGetAccountStatus  ->  is Inspector on, and is Lambda scanning on?
+ListCoverage           ->  is THIS function covered and actively scanned?
+ListFindings           ->  only now does [] mean "clean"
+```
+
+**Why:** `list-findings` against this account returned `{"findings": []}` while
+Inspector had never been enabled (FAILURES.md F-010). The three-line naive
+collector reports zero known vulnerabilities for a service nobody has ever
+scanned, and it reads as positive evidence of safety.
+
+**Two switches, not one.** Inspector can be `ENABLED` account-wide while Lambda
+scanning specifically is `DISABLED`. Checking only account status looks thorough
+and catches nothing.
+
+**A test asserts `list_findings` is never even called when the guard fails.**
+Asserting only on the returned status would pass for a collector that asks the
+question first and discards the answer — which is one careless refactor away
+from using it.
+
+**Cost:** three API calls instead of one, on every verdict. Both extra calls are
+free and fast. That is the entire price of the signal meaning what it says.
+
+---
+
+## D-022 — Inspector answers a different question than the gate asks
+
+**Decision:** `SecurityFindings.is_candidate_artifact` is recorded on every
+result, and is `False` for everything Inspector produces.
+
+**Why it matters more than a boolean suggests.** Amazon Inspector scans
+**deployed** resources. The gate runs **before** the deploy. So findings
+collected at gate time describe the version currently live — not the candidate
+about to replace it.
+
+The gate asks *"is this change safe?"*. Inspector answers *"is the thing this
+change would replace currently known to be vulnerable?"*. Both are useful and
+they are not the same question, and nothing in the API surface signals the
+difference.
+
+It is still worth collecting. Deploying into a service with active criticals is
+real context, and a change that remediates them is a point in its favour. But
+treating it as vulnerability data about the new code would be wrong, and the
+mistake would be invisible.
+
+**What would answer the real question:** an SBOM generated during the build and
+scanned before deploy (`inspector-sbomgen` plus the `inspector-scan` API). That
+is a separate mechanism with build-sourced provenance, deferred rather than
+rejected.
+
+**The general lesson, and it is the one worth teaching:** the obvious signal
+source for a question often answers a subtly different question. Recording which
+question was actually answered costs one field. Discovering the mismatch after
+building a verdict layer on top of it costs considerably more.
+
+---
+
+## D-023 — Unknown severity gets its own value rather than being rounded
+
+**Decision:** `Severity.UNKNOWN` exists. Inspector's `UNTRIAGED`, and any
+severity string AWS adds in future, map to it.
+
+**Why:** the two available shortcuts are both wrong. Folding unscored findings
+into `LOW` or `INFORMATIONAL` makes an unscored critical vulnerability vanish
+into the noise floor. Mapping them up to `CRITICAL` makes the gate cry wolf and
+teaches people to ignore it.
+
+A bundle reporting *"3 critical, 1 unknown"* is telling the truth. One reporting
+*"3 critical, 1 low"* is not.
+
+**Related, and the same reasoning applied twice more:**
+
+- Inspector writes `"NotAvailable"` in `fixedInVersion` when no patch exists.
+  Kept as a literal string it reads as a version number and `is_fixable` reports
+  `True` for something with no remedy at all. Normalised to `None`.
+- A finding that cannot be parsed is dropped and logged, not raised on. One
+  malformed record in a list of forty should not discard the other thirty-nine.
+
+---
+
+## D-024 — Standard scanning only, not code scanning
+
+**Decision:** enable Amazon Inspector **Lambda standard scanning**; leave Lambda
+code scanning off.
+
+**Verified pricing** (AWS Price List API, us-east-1, August 2026):
+
+| Scan type | Hourly, per function | ~Monthly |
+| --- | --- | --- |
+| Lambda standard (dependencies) | $0.00042 | $0.31 |
+| Lambda code (application logic) | $0.00084 | $0.61 |
+
+At three Lambdas that is roughly **$0.92/month** versus $2.76. Both dimensions
+also have `-free-trial` variants priced at zero.
+
+**Why standard is sufficient:** Phase 2.5 synthesises deliberately vulnerable
+*dependencies*, which is precisely what standard scanning detects. CLAUDE.md
+forbids deliberately exploitable application logic, so code scanning would cost
+double to find nothing by design.
+
+**Flagged because it is a standing hourly cost** — the first collector whose
+existence bills whether or not a deploy happens. Inspector appears in the
+account's credit-eligible service list.
+
+**Not enabling it is a supported state, not a broken one.** The
+`security_scanning` variable distinguishes the two: `false` yields `SKIPPED`
+("we chose not to look"), `true` runs the real collector, which reports
+`UNAVAILABLE` with a reason while Inspector is off. Neither is ever allowed to
+read as "nothing wrong".
+
+---
+
+## D-025 — Tests cannot reach AWS, enforced rather than intended
+
+**Decision:** an autouse pytest fixture replaces `boto3.client` and
+`boto3.resource` with a function that raises. Opt out per-test with
+`@pytest.mark.aws`. Nothing currently opts out.
+
+**Why:** CLAUDE.md constraint 5 was satisfied by construction until Phase 2.3,
+when the gate began building a real Inspector client by default. The suite
+silently started making live API calls and its runtime went from 2 seconds to 88
+(FAILURES.md F-011).
+
+The slowness was the symptom. The real cost is that such tests depend on
+credentials, on network, and on live account state — so they pass on one machine
+and fail in CI, or pass for the wrong reason. Enabling Inspector later would have
+changed test outcomes with no code change at all.
+
+**Paired with a design fix:** `collect_bundle()` now accepts injected collectors,
+defaulting to the real ones. The same dependency injection `collect_signals()`
+already used one level down, carried up to where the network dependency actually
+appeared.
+
+**A test asserts the guard itself works.** A guardrail nobody verifies is not a
+guardrail — the lesson from F-003, applied to test infrastructure.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

@@ -214,9 +214,142 @@ canary look broken. Every rate the gate is shown needs a denominator attached.
 
 ---
 
+## Real security findings (Phase 2.3)
+
+### The empty list that means nothing
+
+This is the increment where the Phase 2.1 rule stopped being theory.
+
+```text
+$ aws inspector2 list-findings
+{ "findings": [] }
+```
+
+No error. No warning. An empty list — byte-for-byte what a thoroughly scanned,
+genuinely clean service returns.
+
+The account's actual state:
+
+```text
+$ aws inspector2 batch-get-account-status
+594380318102   DISABLED   lambda: DISABLED   ecr: DISABLED   ec2: DISABLED
+```
+
+Amazon Inspector had **never been switched on**. And the API for "show me the
+vulnerabilities" said "there are none".
+
+The naive collector is three lines. It is obviously correct, it passes review,
+and it tells the verdict layer that a service nobody has ever scanned has zero
+known vulnerabilities.
+
+**That is worse than having no security signal at all.** A missing collector
+prompts a question. A clean scan closes it.
+
+### The fix: earn the right to interpret the answer
+
+```text
+  1. BatchGetAccountStatus   is Inspector on, and is Lambda scanning on?
+  2. ListCoverage            is THIS function covered and actively scanned?
+  3. ListFindings            only now does [] mean "clean"
+```
+
+Any of the first two failing gives `UNAVAILABLE` with a reason — never zero.
+
+Two details worth keeping:
+
+- **Two switches, not one.** Inspector can be `ENABLED` account-wide while Lambda
+  scanning specifically is `DISABLED`. Checking only account status looks
+  thorough and catches nothing.
+- **A test asserts `ListFindings` is not even called when the guard fails.**
+  Asserting only on the returned status would also pass for a collector that asks
+  the question first and throws the answer away — which is one careless refactor
+  away from using it.
+
+### Inspector answers a different question than the gate asks
+
+Amazon Inspector scans **deployed** resources. The gate runs **before** the
+deploy. So findings collected at gate time describe the version *currently live*,
+not the candidate about to replace it.
+
+| The gate asks | Inspector answers |
+| --- | --- |
+| Is this change safe? | Is the thing this change would replace currently known to be vulnerable? |
+
+Both are useful. They are not the same question, and nothing in the API surface
+hints at the difference. Recorded as `is_candidate_artifact: False` on every
+result, so the verdict layer and the audit record can both see which question got
+answered.
+
+Answering the real one needs a different mechanism entirely: an SBOM generated
+during the build and scanned before deploy. Deferred, not rejected.
+
+**The transferable lesson:** the obvious signal source for a question often
+answers a subtly different one. Recording which question was actually answered
+costs one field. Finding out after building a verdict layer on top costs a great
+deal more.
+
+### Three smaller judgements, same rule each time
+
+- **`UNTRIAGED` severity becomes `UNKNOWN`, not `LOW`.** Folding unscored findings
+  downward makes an unscored critical vanish into the noise floor; folding them
+  upward makes the gate cry wolf. "3 critical, 1 unknown" is true. "3 critical,
+  1 low" is not.
+- **`fixedInVersion: "NotAvailable"` becomes `None`.** Kept as a literal string it
+  reads as a version number, and `is_fixable` would report `True` for something
+  with no patch anywhere.
+- **Only `ACTIVE` findings are requested.** Reporting suppressed findings somebody
+  deliberately accepted, or closed ones already fixed, is how a gate loses
+  credibility and gets switched off.
+
+### Truncation is DEGRADED, not silent
+
+A function with 400 findings would blow any prompt budget. The collector carries
+the 50 most severe and raises `PartialSignal`, which the base class turns into a
+`DEGRADED` result carrying both the data *and* the admission:
+
+```text
+400 findings found, carrying the 50 most severe;
+counts below are therefore a floor, not a total
+```
+
+Same reasoning as `paths_omitted` in the change-context payload. Until 2.3,
+`DEGRADED` was a status with nothing able to produce it.
+
+### The cost, and why it is optional
+
+| Scan type | Per function per hour | ~Monthly |
+| --- | --- | --- |
+| Lambda standard (dependencies) | $0.00042 | $0.31 |
+| Lambda code (application logic) | $0.00084 | $0.61 |
+
+Verified from the AWS Price List API, not from memory. At three Lambdas: about
+**$0.92/month** for standard scanning. Standard is enough — Phase 2.5 synthesises
+vulnerable *dependencies*, and CLAUDE.md forbids deliberately exploitable
+application logic, so code scanning would cost double to find nothing by design.
+
+Declining to enable Inspector is a supported state. `security_scanning = false`
+yields `SKIPPED` ("we chose not to look"); `true` runs the real collector, which
+reports `UNAVAILABLE` with a reason while Inspector is off. Neither is ever
+allowed to read as "nothing wrong".
+
+### A bug the increment caused
+
+Wiring the real collector in made the test suite start calling AWS for real —
+runtime went from 2 seconds to 88. The collector builds its boto3 client lazily,
+so every test touching the gate silently made three live API calls.
+
+The slowness was the least of it. Such tests depend on credentials, on network,
+and on live account state: they pass on one laptop and fail in CI, and enabling
+Inspector later would have changed test outcomes with no code change.
+
+Fixed structurally — an autouse fixture makes `boto3.client` raise unless a test
+is explicitly marked `@pytest.mark.aws`, and a test verifies the guard itself
+works. A guardrail nobody checks is not a guardrail.
+
+---
+
 ## Still to come in Phase 2
 
-- **2.3 — Amazon Inspector.** Real security findings.
 - **2.4 — Amazon CloudWatch.** Real target health, plus a deploy-cadence
   collector reading the CodeDeploy control plane (`AWS_API` provenance rather
   than self-reported).
