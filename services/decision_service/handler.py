@@ -44,6 +44,7 @@ from signals import (
     InspectorFindingsCollector,
     MockChangeContextCollector,
     PipelineChangeContextCollector,
+    TargetHealthCloudWatchCollector,
     collect_signals,
 )
 from signals.types import DeploymentTarget
@@ -187,6 +188,11 @@ SERVICE_NAME = os.environ.get("TARGET_SERVICE", "ai-pre-traffic-gate-demo-app")
 # means UNAVAILABLE with a reason rather than a fabricated clean result.
 SECURITY_SCANNING = os.environ.get("SECURITY_SCANNING", "true").strip().lower() != "false"
 
+# CloudWatch metric queries and DescribeAlarms are billed per API request at a
+# rate that rounds to nothing at one verdict per deploy, so unlike Inspector this
+# collector has no standing cost and defaults on.
+HEALTH_WINDOW_MINUTES = int(os.environ.get("HEALTH_WINDOW_MINUTES", "60"))
+
 
 def collect_bundle(
     event: dict[str, Any],
@@ -201,11 +207,12 @@ def collect_bundle(
     when the model arrives we already know the signals are real -- the same
     reason Phase 1 built the deploy path before any AI touched it.
 
-    Target health still uses DisabledCollector rather than a mock.
-    That matters: a mock here would put fabricated health data into the audit
-    trail of a real deployment, which is exactly the "absent signal read as a
-    reassuring one" failure the whole package exists to prevent. SKIPPED is the
-    honest status for a collector that does not exist yet.
+    From Phase 2.4 all three collectors are real. Note what none of them are:
+    mocks. A mock in this path would put fabricated health or security data into
+    the audit trail of a real deployment, which is precisely the "absent signal
+    read as a reassuring one" failure the package exists to prevent. Where a real
+    collector cannot answer, it says so -- UNAVAILABLE or DEGRADED with a reason,
+    never a plausible zero.
     """
     change_collector: Any
     if event.get("CodePipeline.job"):
@@ -233,7 +240,9 @@ def collect_bundle(
             )
 
     if health_collector is None:
-        health_collector = DisabledCollector("target_health", "not implemented until Phase 2.4")
+        health_collector = TargetHealthCloudWatchCollector(
+            SERVICE_NAME, window_minutes=HEALTH_WINDOW_MINUTES
+        )
 
     return collect_signals(
         target=DeploymentTarget(service_name=SERVICE_NAME),

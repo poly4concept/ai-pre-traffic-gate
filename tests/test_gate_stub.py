@@ -230,6 +230,7 @@ def test_gate_collects_real_change_context_from_a_pipeline_event(monkeypatch):
     bundle = handler.collect_bundle(
         pipeline_event(),
         security_collector=handler.DisabledCollector("security_findings", "not under test"),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
     )
 
     assert bundle.change.status is SignalStatus.OK
@@ -238,28 +239,32 @@ def test_gate_collects_real_change_context_from_a_pipeline_event(monkeypatch):
     assert bundle.has_required_signals
 
 
-def test_unimplemented_collectors_are_skipped_not_mocked(monkeypatch):
-    """A mock here would write fabricated health data into a real audit trail.
+def test_no_collector_in_the_production_path_is_a_mock(monkeypatch):
+    """From Phase 2.4 all three collectors are real, and must stay that way.
 
-    SKIPPED is the honest status for a collector that does not exist yet. This is
-    the distinction the whole signals package turns on, applied to our own
-    unfinished work rather than to an AWS outage.
+    A mock in this path would write fabricated security or health data into the
+    audit trail of a real deployment -- the "absent signal read as a reassuring
+    one" failure the whole package exists to prevent, committed by us rather than
+    by an AWS outage.
 
-    Security is no longer in that category -- Phase 2.3 gave it a real collector,
-    so it is injected here as SKIPPED to keep this test about target health.
+    Asserted on the constructed collector types rather than on statuses, because
+    a mock returning plausible data would produce an OK status and look correct.
     """
     handler = load(monkeypatch, "allow", "shadow")
+    built: dict[str, object] = {}
 
-    bundle = handler.collect_bundle(
-        pipeline_event(),
-        security_collector=handler.DisabledCollector("security_findings", "not under test"),
-    )
+    def capture(**kwargs):
+        built.update(kwargs)
+        raise RuntimeError("stop before any API call")
 
-    assert bundle.health.status is SignalStatus.SKIPPED
-    assert bundle.health.data is None
-    # Skipped is missing, but it is not a failure -- nobody should be paged.
-    assert "target_health" in bundle.missing
-    assert bundle.failed == ()
+    monkeypatch.setattr(handler, "collect_signals", capture)
+    with pytest.raises(RuntimeError, match="stop before"):
+        handler.collect_bundle(pipeline_event())
+
+    assert isinstance(built["security_collector"], handler.InspectorFindingsCollector)
+    assert isinstance(built["health_collector"], handler.TargetHealthCloudWatchCollector)
+    for name in ("change_collector", "security_collector", "health_collector"):
+        assert "Mock" not in type(built[name]).__name__, name
 
 
 def test_a_direct_invoke_has_no_change_to_describe(monkeypatch):
@@ -269,6 +274,7 @@ def test_a_direct_invoke_has_no_change_to_describe(monkeypatch):
     bundle = handler.collect_bundle(
         {},
         security_collector=handler.DisabledCollector("security_findings", "not under test"),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
     )
 
     assert bundle.change.status is SignalStatus.UNAVAILABLE
@@ -281,6 +287,7 @@ def test_a_tampered_payload_yields_no_change_context(monkeypatch):
     bundle = handler.collect_bundle(
         pipeline_event(trusted_sha="f" * 40),
         security_collector=handler.DisabledCollector("security_findings", "not under test"),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
     )
 
     assert bundle.change.status is SignalStatus.UNAVAILABLE
@@ -293,6 +300,7 @@ def test_the_bundle_is_json_serialisable_for_the_audit_log(monkeypatch):
     payload = handler.collect_bundle(
         pipeline_event(),
         security_collector=handler.DisabledCollector("security_findings", "not under test"),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
     ).to_dict()
 
     json.dumps(payload)  # raises if a datetime or Enum survived
@@ -372,7 +380,10 @@ def test_security_scanning_off_yields_skipped_not_a_fake_clean_result(monkeypatc
     """Declining to pay for Inspector is a choice, not a clean bill of health."""
     handler = load_with_env(monkeypatch, SECURITY_SCANNING="false")
 
-    bundle = handler.collect_bundle(pipeline_event())
+    bundle = handler.collect_bundle(
+        pipeline_event(),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
+    )
 
     assert bundle.security.status is SignalStatus.SKIPPED
     assert bundle.security.data is None
@@ -423,7 +434,10 @@ def test_inspector_failure_does_not_block_the_bundle(monkeypatch):
         lambda *a, **k: handler.MockChangeContextCollector(raises=RuntimeError("boom")),
     )
 
-    bundle = handler.collect_bundle(pipeline_event())
+    bundle = handler.collect_bundle(
+        pipeline_event(),
+        health_collector=handler.DisabledCollector("target_health", "not under test"),
+    )
 
     assert bundle.change.is_usable
     assert bundle.security.status is SignalStatus.UNAVAILABLE

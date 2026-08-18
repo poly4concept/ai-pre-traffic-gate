@@ -212,6 +212,22 @@ QUIET_TARGET = TargetHealth(
 )
 
 
+# No traffic at all, and no alarms watching. The state the real demo app was in
+# when the CloudWatch collector was written, and the one that most tempts a
+# verdict layer into a false positive: nothing looks wrong because nothing is
+# measurable. `error_rate_pct` is None rather than 0.0 -- a ratio with a zero
+# denominator is undefined, not zero (DECISIONS.md D-026).
+#
+# The honest reading is "we have no evidence about this target either way",
+# which is a materially different input from "this target is healthy".
+IDLE_UNMONITORED_TARGET = TargetHealth(
+    error_rate_pct=None,
+    p99_latency_ms=None,
+    invocations_last_hour=0,
+    alarms=(),
+    has_alarm_coverage=False,
+)
+
 # --- Named combinations ---------------------------------------------------
 
 SCENARIOS: dict[str, dict[str, object]] = {
@@ -273,5 +289,14 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "security": NO_FINDINGS,
         "health": QUIET_TARGET,
         "note": "Health metrics are pristine and statistically meaningless.",
+    },
+    "no_health_evidence_at_all": {
+        "change": RISKY_PAYMENTS_CHANGE,
+        "security": NO_FINDINGS,
+        "health": IDLE_UNMONITORED_TARGET,
+        "note": "A large off-hours change into a target with zero traffic and no "
+        "alarms. Nothing looks wrong because nothing is measurable. Tests whether "
+        "the verdict layer can tell 'no evidence of problems' from 'evidence of "
+        "no problems' -- the distinction the whole signals package exists for.",
     },
 }

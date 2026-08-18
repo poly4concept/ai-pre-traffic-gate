@@ -28,6 +28,7 @@ from .change_context import (
     decode_payload,
     extract_user_parameters,
 )
+from .cloudwatch import MetricsUnavailableError, TargetHealthCloudWatchCollector
 from .collectors import (
     ChangeContextCollector,
     MockChangeContextCollector,
@@ -60,6 +61,7 @@ __all__ = [
     "ChangeContextCollector",
     "DeploymentTarget",
     "DisabledCollector",
+    "MetricsUnavailableError",
     "MockChangeContextCollector",
     "InspectorFindingsCollector",
     "InspectorNotEnabledError",
@@ -79,6 +81,7 @@ __all__ = [
     "SignalResult",
     "SignalStatus",
     "TargetHealth",
+    "TargetHealthCloudWatchCollector",
     "TargetHealthCollector",
     "collect_signals",
     "decode_payload",

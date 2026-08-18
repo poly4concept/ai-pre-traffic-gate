@@ -348,11 +348,91 @@ works. A guardrail nobody checks is not a guardrail.
 
 ---
 
+## Live target health (Phase 2.4)
+
+This is the signal a test suite **structurally cannot provide**, and the reason
+the project exists. Tests tell you the code is correct. They cannot tell you the
+service you are about to deploy into is currently on fire.
+
+### The third empty answer, and the most flattering
+
+```text
+$ aws cloudwatch get-metric-data ...
+[["inv", "Complete", []], ["err", "Complete", []], ["dur", "Complete", []]]
+```
+
+`StatusCode: "Complete"` — the query succeeded. `Values: []` — nothing in it. The
+demo app had not been invoked in the window.
+
+What the obvious implementation reports:
+
+| Field | Naive result | Reality |
+| --- | --- | --- |
+| invocations | 0 | 0 — correct |
+| error rate | **0%** | undefined |
+| p99 latency | **0ms** | undefined |
+
+That is not a missing signal. **A 0% error rate with a 0ms p99 is a better health
+report than any real service could produce** — and `StatusCode: Complete` invites
+you to trust it. Inspector's empty list merely failed to raise a concern; these
+numbers actively assert excellence.
+
+**A rate is not a number, it is a pair.** `0/0` is undefined, not zero. So
+`error_rate_pct` and `p99_latency_ms` are `None` when there is no traffic, and
+`has_health_evidence` separates *measured and fine* from *nothing to measure*.
+
+There is an uncomfortable detail worth teaching: `sum(values) or 0` exists to
+stop a crash on empty input. It succeeds — and converts a loud failure into a
+silent falsehood. **The defensive guard is the bug.** The crash would have been
+safer.
+
+### The same ambiguity in the alarm list
+
+`DescribeAlarms` also returned `[]` — the account has no alarms at all. Empty is
+ambiguous between:
+
+- *monitored, nothing firing* — positive evidence
+- *not monitored* — no evidence
+
+Opposite meanings, identical representation. Recorded as `has_alarm_coverage`, and
+its absence makes the signal DEGRADED: the metrics are real, but the alarm
+dimension says nothing however healthy they look.
+
+Alarms are matched to a service by the **FunctionName dimension**, never by alarm
+name. An alarm called `demo-app-errors` that actually watches a different
+function would otherwise be counted as evidence about this one. Names drift;
+dimensions are what CloudWatch evaluates.
+
+**Expect every verdict to be DEGRADED until Phase 2.5 creates alarms.** That is
+accurate rather than noisy — and it is the clearest possible argument for doing
+Phase 2.5.
+
+### Throttles count as errors
+
+A throttled invocation never ran, and from the caller's side that is a failed
+request. Excluding them would let a service pinned at its concurrency ceiling
+report a healthy error rate while rejecting traffic — exactly the condition a
+deployment gate should notice.
+
+### The pattern, now that there are three
+
+| Collector | How "nothing" arrives | What it looks like |
+| --- | --- | --- |
+| Inspector | `{"findings": []}` | no vulnerabilities |
+| CloudWatch metrics | `Complete` + no datapoints | perfect health |
+| CloudWatch alarms | `[]` | nothing firing |
+
+**None of them error.** This is not a quirk of one service — it is what "no data"
+looks like across AWS. After the third instance it stops being a discovery and
+becomes the default assumption: *an API that returns a collection will return an
+empty collection for reasons that have nothing to do with your question.*
+
+---
+
 ## Still to come in Phase 2
 
-- **2.4 — Amazon CloudWatch.** Real target health, plus a deploy-cadence
-  collector reading the CodeDeploy control plane (`AWS_API` provenance rather
-  than self-reported).
+- **Deploy cadence** — a collector reading the CodeDeploy control plane, so
+  cadence carries `AWS_API` provenance rather than being self-reported or absent.
 - **2.5 — synthesized-real signals.** Deliberately break the demo app so the
   real collectors parse real findings, rather than trusting mocks that agree
   with our assumptions about API shapes.

@@ -259,11 +259,44 @@ class TargetHealth:
     the target is currently on fire.
     """
 
-    error_rate_pct: float
-    p99_latency_ms: float
+    # None, not 0.0, when there is no traffic to compute them from.
+    #
+    # Phase 2.4. An error RATE is a ratio, and a ratio with a zero denominator is
+    # undefined rather than zero. A service invoked no times in the window has no
+    # error rate at all -- reporting 0% would be stating something false, and
+    # stating it in the most reassuring possible direction.
+    #
+    # CloudWatch makes this trap easy to fall into. `GetMetricData` for an idle
+    # function returns `StatusCode: "Complete"` with an empty `Values` array: the
+    # query succeeded, there is simply nothing in it. `sum(values) or 0` then
+    # yields a perfect health report -- 0% errors, 0ms p99 -- for a function
+    # nobody has called.
+    error_rate_pct: float | None
+    p99_latency_ms: float | None
     invocations_last_hour: int
     alarms: tuple[Alarm, ...] = ()
     window_minutes: int = 60
+
+    # Whether any CloudWatch alarms exist for this service at all.
+    #
+    # An empty `alarms` tuple is ambiguous on its own: it could mean "monitored,
+    # nothing firing" (good news) or "not monitored" (no news). Those must not
+    # look alike. False means the alarm dimension of this signal carries no
+    # information, however healthy the metrics look.
+    has_alarm_coverage: bool = True
+
+    @property
+    def has_health_evidence(self) -> bool:
+        """Whether these numbers actually say anything about health.
+
+        The distinction the verdict layer needs: "measured and fine" versus
+        "nothing to measure". Both look like an absence of problems.
+        """
+        return (
+            self.invocations_last_hour > 0
+            and self.error_rate_pct is not None
+            and self.p99_latency_ms is not None
+        )
 
     @property
     def alarms_in_alarm(self) -> tuple[Alarm, ...]:

@@ -107,6 +107,26 @@ data "aws_iam_policy_document" "gate_stub" {
     ]
     resources = ["*"]
   }
+
+  # Phase 2.4 -- read-only CloudWatch access for live target health.
+  #
+  # GetMetricData covers all four Lambda metrics in a single request. DescribeAlarms
+  # is needed for a reason worth stating: an empty alarm list is ambiguous between
+  # "monitored and quiet" and "not monitored at all", and only enumerating the
+  # alarms distinguishes them.
+  #
+  # `*` because neither action supports resource-level permissions -- CloudWatch
+  # metrics have no ARNs. Both are reads: the gate cannot create an alarm, change
+  # a threshold, set an alarm state, or publish a metric. It cannot manufacture
+  # the health evidence it is about to be judged on.
+  statement {
+    sid = "ReadTargetHealth"
+    actions = [
+      "cloudwatch:GetMetricData",
+      "cloudwatch:DescribeAlarms",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "gate_stub" {

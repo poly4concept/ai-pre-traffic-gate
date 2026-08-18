@@ -643,6 +643,80 @@ guardrail — the lesson from F-003, applied to test infrastructure.
 
 ---
 
+## D-026 — Rates are `None`, not zero, when there is nothing to divide by
+
+**Decision:** `TargetHealth.error_rate_pct` and `p99_latency_ms` are
+`float | None`, and are `None` whenever the window contains no invocations.
+
+**Why:** an error rate is a ratio. A ratio with a zero denominator is undefined,
+not zero. Reporting `0%` for an uninvoked function states something false, and
+states it in the most reassuring possible direction (FAILURES.md F-012).
+
+CloudWatch makes the mistake easy: `GetMetricData` for an idle function returns
+`StatusCode: "Complete"` with an empty `Values` array. The query succeeded; there
+is simply nothing in it. `sum(values) or 0` then yields a 0% error rate and a 0ms
+p99 — a better health report than any real service could produce.
+
+**The uncomfortable part:** the `or 0` exists to prevent a crash on empty input.
+It works, and converts a loud failure into a silent falsehood. The crash would
+have been safer.
+
+**Also required:** both halves of the ratio. If Invocations reported data and
+Errors did not, we do not know the error count, and assuming zero would invent
+the most favourable answer available.
+
+**Exposed as** `has_health_evidence`, which separates "measured and fine" from
+"nothing to measure". Both otherwise look like an absence of problems.
+
+---
+
+## D-027 — Alarm coverage is recorded separately from alarm state
+
+**Decision:** `TargetHealth.has_alarm_coverage` is a distinct field from the
+`alarms` tuple.
+
+**Why:** an empty alarm list is ambiguous between two facts with opposite
+meanings — "this service is monitored and nothing is firing" (positive evidence)
+and "this service has no alarms at all" (no evidence). They are indistinguishable
+from the tuple alone, and the account genuinely has zero alarms today, so the
+ambiguity is live rather than theoretical.
+
+No coverage yields a DEGRADED signal: the metrics are real, and the alarm
+dimension carries no information however healthy they look.
+
+**Related:** alarms are matched to a service by the **FunctionName dimension**,
+not by alarm name. Names are a human convention and drift — an alarm called
+`demo-app-errors` that actually watches a different function would otherwise be
+reported as evidence about this one. Dimensions are what CloudWatch evaluates.
+
+**Consequence to expect:** every verdict is DEGRADED until Phase 2.5 creates
+alarms. That is accurate rather than noisy, and it is the clearest possible
+argument for doing Phase 2.5.
+
+---
+
+## D-028 — One `GetMetricData` call, and throttles count as errors
+
+**Decision:** a single `GetMetricData` request covering Invocations, Errors,
+Duration (p99) and Throttles. Not `GetMetricStatistics`.
+
+**Why:** `GetMetricData` batches several metrics into one request and supports
+percentile statistics directly. Four `GetMetricStatistics` calls would quadruple
+the latency of every verdict for no benefit, and the gate sits in a pipeline
+where its own latency is visible.
+
+**Per-query `StatusCode` is checked, not assumed.** `PartialData` means the
+window was not fully covered, so the value is a floor and the signal is DEGRADED.
+`InternalError` on one metric leaves that metric `None` rather than zero, and the
+other three still report.
+
+**Throttles are added to the error count.** A throttled invocation never ran, and
+from a caller's perspective that is a failed request. Excluding them would let a
+service at its concurrency ceiling report a healthy error rate while rejecting
+traffic — which is precisely the condition a deployment gate should notice.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

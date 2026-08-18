@@ -654,3 +654,67 @@ The 88 seconds was the only visible symptom of all three.
 3. Dependency injection stopped being a style preference at exactly the moment a
    collector grew a network dependency. The pattern was already there one layer
    down and had not been carried up.
+
+---
+
+## F-012 — CloudWatch reports a successful query and returns nothing
+
+**Phase:** 2.4
+
+**Symptom:** none, again, and this one is the most flattering.
+
+```text
+$ aws cloudwatch get-metric-data --start-time ... --end-time ...
+[["inv", "Complete", []], ["err", "Complete", []], ["dur", "Complete", []]]
+```
+
+`StatusCode: "Complete"` — the query ran successfully. `Values: []` — there is
+nothing in it. The demo app simply had not been invoked in the two-hour window.
+
+**What the obvious implementation produces.** `sum(values) or 0` on each metric,
+then divide:
+
+| Field | Reported | Reality |
+| --- | --- | --- |
+| invocations | 0 | 0 (correct) |
+| error rate | **0%** | undefined |
+| p99 latency | **0ms** | undefined |
+
+That is not a missing signal. **A 0% error rate and a 0ms p99 latency is an
+outstanding health report** — better than any real service would ever produce.
+Inspector's empty list at least merely failed to raise a concern; these numbers
+actively assert excellence, and `StatusCode: Complete` invites you to believe
+them.
+
+`0/0` is also either a `ZeroDivisionError` or, if guarded with `or 0`, a
+fabricated zero. The guard that stops the crash is what creates the lie.
+
+**Fix:** an error rate is a ratio, and a ratio with a zero denominator is
+*undefined*, not zero. `error_rate_pct` and `p99_latency_ms` are `float | None`,
+`None` whenever there is no traffic to compute them from. `has_health_evidence`
+distinguishes "measured and fine" from "nothing to measure", and the collector
+returns DEGRADED with the reason spelled out:
+
+```text
+no invocations in the last 60 minutes;
+error rate and latency are undefined rather than zero
+```
+
+**A second ambiguity in the same collector.** `DescribeAlarms` returned an empty
+list too — the account has no alarms at all. Empty is ambiguous between
+"monitored, nothing firing" (good news) and "not monitored" (no news), and those
+have opposite implications. Recorded explicitly as `has_alarm_coverage`.
+
+**Lessons:**
+
+1. **Three collectors, three APIs, three different ways to say "nothing" that
+   look like "fine".** Inspector: an empty findings list. CloudWatch metrics: a
+   `Complete` status with no datapoints. CloudWatch alarms: an empty alarm list.
+   None of them error. This is not a quirk of one service — it is what "no data"
+   looks like across AWS, and the pattern is now expected rather than discovered.
+2. **A rate is not a number, it is a pair.** Any ratio a verdict sees needs its
+   denominator attached. The Phase 1 canary taught this with 20-sample polls
+   (D-019); it is the same lesson at a different layer, and it will recur.
+3. **The defensive guard can be the bug.** `sum(values) or 0` exists to prevent a
+   crash on empty input. It succeeds, and in doing so converts a loud failure
+   into a silent falsehood. Preferring the crash would have been safer.
