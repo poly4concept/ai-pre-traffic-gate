@@ -9,12 +9,36 @@ about production.
     schema.py      the tool schema handed to Bedrock. A prompt, not a contract.
     validation.py  the actual contract. Read this one closely.
     prompt.py      the question: a signal bundle rendered for Converse
+    bedrock.py     asking it, and failing closed when that does not go well
+    audit.py       the immutable record of what was decided and why
 
 Start with `schema.py`, specifically the note at the top: Bedrock does not
 validate tool input against the schema you give it. Everything else in this
 package follows from that single fact.
 """
 
+from .audit import (
+    MAX_FIELD_CHARS,
+    AuditWriteResult,
+    AuditWriteStatus,
+    VerdictAuditWriter,
+    build_dynamodb_client,
+    build_record,
+)
+from .bedrock import (
+    BACKOFF_SECONDS,
+    DEADLINE_SECONDS,
+    MAX_ATTEMPTS,
+    MAX_TOKENS,
+    RETRYABLE_ERROR_CODES,
+    TEMPERATURE,
+    BedrockVerdictClient,
+    ModelCall,
+    ModelResponseError,
+    VerdictOutcome,
+    build_bedrock_client,
+    extract_tool_input,
+)
 from .prompt import (
     MAX_COMMIT_MESSAGE_CHARS,
     MAX_FINDINGS_IN_PROMPT,
@@ -46,24 +70,42 @@ from .validation import VerdictValidationError, parse_verdict
 
 __all__ = [
     "ACTION_FOR_RISK",
+    "BACKOFF_SECONDS",
+    "MAX_FIELD_CHARS",
+    "AuditWriteResult",
+    "AuditWriteStatus",
+    "VerdictAuditWriter",
+    "DEADLINE_SECONDS",
     "MAX_COMMIT_MESSAGE_CHARS",
-    "MAX_FINDINGS_IN_PROMPT",
-    "PROMPT_VERSION",
-    "SYSTEM_PROMPT",
     "MAX_CONCERNS",
     "MAX_CONCERN_CHARS",
+    "MAX_FINDINGS_IN_PROMPT",
+    "MAX_ATTEMPTS",
     "MAX_REASONING_CHARS",
+    "MAX_TOKENS",
+    "PROMPT_VERSION",
+    "RETRYABLE_ERROR_CODES",
     "RISK_ORDER",
+    "SYSTEM_PROMPT",
+    "TEMPERATURE",
     "VERDICT_FIELDS",
     "VERDICT_SCHEMA",
     "VERDICT_TOOL_NAME",
     "Action",
+    "BedrockVerdictClient",
+    "ModelCall",
+    "ModelResponseError",
     "RiskLevel",
     "Verdict",
+    "VerdictOutcome",
     "VerdictSource",
     "VerdictValidationError",
     "action_for",
+    "build_bedrock_client",
+    "build_dynamodb_client",
+    "build_record",
     "build_messages",
+    "extract_tool_input",
     "parse_verdict",
     "render_bundle",
     "system_blocks",

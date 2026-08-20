@@ -1076,6 +1076,308 @@ actually worked.
 
 ---
 
+## D-040 — `get_verdict()` cannot raise, and that is a type-level claim
+
+**Decision:** the Bedrock client's entry point has no failure path that escapes.
+Its return type is "a verdict, always"; the only question is which one.
+
+**Why the shape matters more than the behaviour.** The obvious way to write this
+is the happy path wrapped in a net:
+
+```python
+try:
+    return parse(call_bedrock())
+except Exception:
+    return fail_closed()
+```
+
+That produces correct behaviour today and depends on a human keeping the net
+intact forever. Add a `json.loads` above the `try`, refactor the parse out into a
+helper that raises before the guard, catch a narrower exception class during a
+tidy-up — and the safe path quietly develops a hole that no test necessarily
+covers, because the hole is in the *arrangement* of the code rather than in any
+statement.
+
+Written the other way round, the fail-closed verdict is what the function
+*constructs* when it does not have a better answer. There is no net to maintain
+because there is nothing to catch it.
+
+**How it is verified:** `test_no_exception_escapes_get_verdict` fires twelve
+exception types — seven AWS error codes, two network errors, and three plain
+Python exceptions including `KeyError` and `RuntimeError` — and asserts a HIGH
+fail-closed verdict comes back from each. That test is what turns "fail closed"
+from a design principle into a property of the code.
+
+**The `except Exception` is deliberate and carries a `noqa`.** A bare broad catch
+is normally a smell, and here it is the specification: the point is that nothing
+escapes, so narrowing it would be the bug. The linter suppression is annotated
+with that reasoning in place rather than the rule being disabled globally.
+
+---
+
+## D-041 — Nine failure modes, one outcome, nine distinct labels
+
+**Decision:** every way the call can fail is named in the audit record
+(`failure_kind`), even though all nine produce the same action.
+
+The list, because it is longer than it first appears:
+
+| `failure_kind` | what happened |
+| --- | --- |
+| `required_signals_missing` | no change context, so nothing to ask about |
+| `aws:ThrottlingException` etc. | throttled, unavailable, timed out, denied |
+| `no_tool_call` | model replied in prose despite `toolChoice` |
+| `wrong_tool` | called a tool, not ours |
+| `multiple_tool_calls` | called ours twice |
+| `max_tokens` | hit the ceiling mid-tool-call |
+| `content_filtered` | a filter or guardrail stopped generation |
+| `invalid_verdict:<field>` | arguments arrived and failed validation |
+| `malformed_response` | response shape was not what the API documents |
+
+**Why bother, when the behaviour is identical.** Because Phase 4 has to
+distinguish a *prompt* problem from an *infrastructure* problem, and an
+undifferentiated failure count cannot. "The gate halted 12 deploys this week"
+means something completely different depending on whether those were twelve
+throttles or twelve out-of-enum risk levels. One is an account limit; the other
+means the prompt or the schema wording needs work.
+
+**Two of these deserve special mention as talk content:**
+
+`no_tool_call` is the failure mode that *proves* `toolChoice` is a strong steer
+rather than a guarantee — the same lesson as D-033's "the schema is not
+validated", arriving from a different direction. It is rare and it is real.
+
+`max_tokens` is the most dangerous of the nine, because the truncated tool
+arguments **may still parse and may still validate**. A verdict built from half a
+sentence of reasoning would look entirely normal. It gets its own branch checked
+*before* the arguments are read, precisely so that plausibility never gets the
+chance to be mistaken for correctness.
+
+---
+
+## D-042 — Two independent bounds: a deadline for time, an attempt cap for money
+
+**Decision:** retries stop when *either* `DEADLINE_SECONDS` (18s) or
+`MAX_ATTEMPTS` (3) is reached. Whichever trips first wins.
+
+**Why not just one.** They limit different resources and they come apart exactly
+where it matters.
+
+A **deadline** is the right bound on waiting, and better than an attempt count
+for that job: three fast throttles and three slow timeouts consume wildly
+different amounts of the pipeline's time, so counting attempts tells you almost
+nothing about how long the stage will block.
+
+But a deadline is a terrible bound on *spending*. A schema-validation failure is
+retryable, and every one of those retries means the model **actually ran and the
+tokens were actually billed**. Under the deadline alone, 18 seconds with this
+backoff allows roughly seven full inferences per pipeline run for a model that
+systematically misformats its output — expensive, and pointless, since it fails
+closed at the end anyway. Three attempts is plenty for the case retries exist to
+cover and far too few for a systematic problem to get costly.
+
+**The line that is easiest to forget:** `retries={"max_attempts": 0}` in the
+botocore `Config`. By default botocore retries throttles and 5xx *silently,
+underneath us*. Leave that on and `attempts` in the audit record becomes
+fiction, the deadline can be blown by retries we never authorised, and one
+"single" call quietly costs several times what was budgeted. Retry policy belongs
+in exactly one place, and if two layers both own it, neither does.
+
+**No jitter in the backoff.** Jitter exists to desynchronise a thundering herd,
+and there is one caller per pipeline execution. Adding randomness would cost the
+exact reproducibility the tests rely on, for a benefit this call pattern cannot
+realise.
+
+---
+
+## D-043 — A validation failure is retried once, and the retry is visible
+
+**Decision:** `VerdictValidationError` is retryable. `ModelResponseError` is
+retryable only for `no_tool_call` and `multiple_tool_calls`.
+
+**Why retry a schema violation at all,** when D-033 says an invalid response
+means the model misunderstood the contract. Because at temperature 0 a model
+still *occasionally* emits an out-of-enum value — not systematically, just
+sometimes. If that happens on 1% of calls, refusing outright halts 1% of deploys
+for no real reason, and a gate that stops one deploy in a hundred at random is a
+gate people learn to route around. One retry takes 1% to 0.01%.
+
+**What makes the retry honest rather than a cover-up:** `attempts` is recorded.
+Phase 4 can therefore still measure the underlying slip rate — the repair does
+not hide the thing it repairs. That is the same condition D-034 attached to
+truncation: repair is acceptable when the record says a repair happened.
+
+**What is not retried, and why:** `max_tokens` and `content_filtered` will
+reproduce identically, so retrying only burns the clock. `AccessDeniedException`,
+`ValidationException` and `ResourceNotFoundException` describe a
+misconfiguration, and repeating a misconfigured call three times just makes the
+pipeline wait longer to be told the same thing. `ThrottlingException` *is*
+retried even though the daily-quota flavour of it can never succeed — we cannot
+tell "briefly rate limited" from "no allowance at all", since both arrive as the
+same error code, so the bounds handle the futile case rather than a special case.
+
+**A related split: `ModelCall` is not part of `Verdict`.** Latency and token
+counts live in a separate record for the same reason `duration_ms` was excluded
+from `SignalBundle.to_dict()` — a verdict is *evidence* and must be
+byte-identical on replay, while operational metrics vary run to run on identical
+input. Merging them would make two identical decisions look different. Both are
+stored; they are simply not the same kind of thing, and Phase 4 compares one
+while Phase 8 charts the other.
+
+---
+
+## D-044 — The raw model output is stored next to the validated verdict
+
+**Decision:** the audit record keeps `raw_model_output` — exactly what the model
+produced, before validation — alongside the `verdict` that survived it.
+
+**Why, when one of them is by definition the wrong one.** Because they disagree
+sometimes, and the disagreements are the only interesting events in the table.
+
+A record holding only the validated verdict cannot tell you that the model
+answered `"critical"` and the validator rejected it, or that the reasoning was
+truncated at 600 characters, or that the model called the tool twice. Those are
+precisely the things Phase 4 has to count in order to say whether the prompt is
+getting better — and they are invisible if the only thing kept is the answer
+that got through.
+
+**It is also what makes the demo honest.** Showing an audience a clean verdict
+record proves nothing; any system can produce one. Showing them a record where
+the model got it wrong and the validator caught it proves the design. The
+failures are the deliverable, which is the same reason `FAILURES.md` exists.
+
+**Stored as a JSON *string*, not a nested map.** Deliberate: this field exists to
+hold whatever the model produced, INCLUDING shapes that violate the schema —
+extra keys, wrong types, nulls. Converting something already known to be
+malformed into a typed DynamoDB structure can fail on exactly the inputs most
+worth keeping. A string always stores.
+
+**What is NOT stored: the system prompt.** Only `prompt_version`. Two and a half
+kilobytes of unchanging instructions copied into every record would double the
+item size to preserve something git already holds, and a version pointer answers
+the same question. The rendered *user* message IS stored, because it differs
+every run and cannot be reconstructed from the signals once the renderer
+changes.
+
+---
+
+## D-045 — Immutability is enforced twice, in two different mechanisms
+
+**Decision:** the gate's IAM policy grants `dynamodb:PutItem` and nothing else,
+AND every write carries `ConditionExpression: attribute_not_exists(verdict_id)`.
+
+**Why both, when either alone looks sufficient.** They stop different things, and
+neither can stop the other's case.
+
+**IAM** withholds `UpdateItem`, `DeleteItem`, `GetItem`, `Query` and `Scan`. That
+is what stops the gate — or anything that steals its role — from amending or
+removing a verdict after the fact. What IAM *cannot* express is the difference
+between a `PutItem` that creates and a `PutItem` that replaces: they are the same
+API action, so a policy granting `PutItem` necessarily grants overwrite.
+
+**The condition** closes exactly that gap. It also makes retries safe, which is
+not hypothetical: CodePipeline can invoke a Lambda more than once for a single
+job, and without the guard the second invocation would overwrite the first
+verdict with a possibly different one. With it, the second write fails
+harmlessly and the first verdict stands.
+
+**A duplicate is therefore a SUCCESS, not an error.** `AuditWriteResult.ok`
+returns True for `DUPLICATE`, because "already recorded" is the state we wanted.
+Treating it as a failure would invite a retry loop trying to force a
+contradiction into a table designed to refuse it.
+
+The general shape: *an audit record the writer can rewrite is not evidence, it is
+a note.* Two independent mechanisms for one property is proportionate when the
+property is the entire point of the resource.
+
+---
+
+## D-046 — A failed audit write does not halt a deploy that has already been judged
+
+**Decision:** `VerdictAuditWriter.record()` returns a status rather than raising,
+and a `FAILED` status is logged, not escalated.
+
+**Why this is not a hole in fail-closed,** which it superficially resembles — same
+argument as D-030 made for deploy cadence, one layer up.
+
+The verdict has **already been decided** by the time this code runs. Failing the
+pipeline because DynamoDB was briefly unavailable would halt a deploy the gate
+had just judged safe, on the basis of a storage problem that says nothing
+whatsoever about the change. Fail-closed is a rule about *the subject of a
+decision*; this is not the subject, it is the filing.
+
+**What makes the trade acceptable** is that the verdict always reaches CloudWatch
+Logs regardless. A failed write degrades the audit trail rather than losing the
+record — there are two sinks, and only one of them can fail this way.
+
+**Where the line would move:** in `enforcing` mode with a human-override path
+(Phase 5), an unrecorded verdict starts to matter more, because the override
+mechanism needs something to override. That is a Phase 5 decision with different
+inputs, and this note exists so it gets revisited rather than inherited.
+
+**Related bound:** `MAX_FIELD_CHARS` clips `raw_model_output` and the stored
+prompt at 20,000 characters. DynamoDB's hard item limit is 400 KB and a normal
+record is 5 KB, so this is not about ordinary size — it is that both fields
+contain attacker-influenced text, which makes item size an input an attacker has
+some influence over. Without a bound, a commit message large enough to blow the
+limit would make the write fail and thereby **remove itself from the audit
+trail**, which is a strange and useful capability to leave lying around.
+
+---
+
+## D-047 — On-demand, a KEYS_ONLY index, PITR on, and deliberately no TTL
+
+**Decision, with the reasoning for each, because all four are demo content:**
+
+**`PAY_PER_REQUEST`, not provisioned.** Provisioned capacity bills per hour
+whether or not a deploy happens — precisely the shape of cost CLAUDE.md forbids
+without asking first. It is also simply the wrong fit: pipeline traffic is bursty
+and near-zero between runs, which is the case on-demand exists for. Verified
+cost at soak volume is about **$0.01/month**, and standing cost is genuinely
+zero.
+
+**A GSI rather than a Scan.** "Every verdict for this service, newest first" is
+the query the demo and the Phase 8 analysis both need, and the primary key cannot
+answer it — `verdict_id` is a pipeline job ID with no ordering. A Scan would work
+perfectly well at demo volume and is deliberately not used, because *the audience
+will copy whatever is on the slide*, and "it worked in the demo" is how people
+learn to scan production tables.
+
+**`KEYS_ONLY`, not `ALL`.** The index answers "which verdicts, in what order";
+the caller then fetches the ones it wants by primary key. `ALL` would copy every
+5 KB record into the index and roughly double both storage and write cost for a
+projection nothing needs.
+
+**Point-in-time recovery on.** $0.0014/month at this size. "How would you recover
+the audit trail?" is the first question a company security review asks, and "we
+could not" is a poor answer about a table whose entire purpose is evidence.
+
+**No TTL, on purpose.** An audit trail that deletes itself is not an audit trail.
+Storage is inside the 25 GB free tier, so there is no cost argument for expiry
+either. A retention policy is a Phase 7 company-environment decision and not
+something to guess at now.
+
+**Deletion protection on, via a variable.** Right default for this table, but it
+makes teardown two steps, so it is `var.verdict_store_deletion_protection` rather
+than a literal — teardown is then `apply -var ...=false` followed by `destroy`,
+which is a documented step rather than a surprise.
+
+**No `server_side_encryption` block, which is not the same as unencrypted.**
+DynamoDB always encrypts at rest. That block's `enabled` flag actually means "use
+a customer-managed KMS key", so writing the default `enabled = false` would read
+on a slide as though encryption were switched off. Omitting it says the same
+thing without the misreading. A CMK would cost about $1/month standing — more
+than the entire table — for key-policy control this account has no use for.
+
+**One verified non-issue worth recording:** `terraform validate` warns that
+`hash_key` is deprecated in favour of a `key_schema` block. That argument does
+not exist in the pinned provider (hashicorp/aws 6.58.0) — adding it fails with
+"Blocks of type key_schema are not expected here", checked rather than assumed.
+The warning names a migration that is not yet available, so `hash_key` stays and
+the finding is a code comment rather than a change.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

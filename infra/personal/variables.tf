@@ -153,3 +153,15 @@ variable "gate_mode" {
     error_message = "gate_mode must be one of: shadow, advisory, enforcing."
   }
 }
+
+# --- Verdict audit store --------------------------------------------------
+
+# True by default: the audit table holds the evidence this whole project
+# produces, and `terraform destroy` should not be able to take it out by
+# accident. Teardown is therefore deliberately two steps -- set this false,
+# apply, then destroy. Documented in docs/runbooks/.
+variable "verdict_store_deletion_protection" {
+  description = "Whether the verdict audit table resists terraform destroy."
+  type        = bool
+  default     = true
+}

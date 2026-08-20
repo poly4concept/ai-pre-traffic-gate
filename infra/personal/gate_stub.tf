@@ -150,6 +150,40 @@ data "aws_iam_policy_document" "gate_stub" {
       "arn:aws:codedeploy:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:application:${aws_codedeploy_app.demo_app.name}",
     ]
   }
+
+  # Phase 3.4 -- write the verdict audit record. PutItem and nothing else.
+  #
+  # WHAT IS ABSENT IS THE DESIGN:
+  #
+  #   dynamodb:UpdateItem  -- cannot amend a verdict after the fact
+  #   dynamodb:DeleteItem  -- cannot remove one
+  #   dynamodb:GetItem     -- does not need to read its own history
+  #   dynamodb:Query/Scan  -- likewise
+  #
+  # An audit record that the writer can later rewrite is not evidence, it is a
+  # note. IAM is the outer of two independent guarantees here: the write itself
+  # is also conditional on `attribute_not_exists(verdict_id)`, which stops
+  # PutItem being used to overwrite -- something IAM cannot express, because
+  # PutItem-that-creates and PutItem-that-replaces are the same action.
+  #
+  # Two mechanisms for one property is deliberate. IAM stops a different caller;
+  # the condition stops this caller retrying into a contradiction.
+  #
+  # Reads belong to whoever inspects the trail -- a human, or the Phase 5
+  # escalation path -- and are deliberately not granted to the thing that writes
+  # it. The GSI ARN is included because DynamoDB treats index access as a
+  # separate resource, and a policy naming only the table would fail the moment
+  # anything queried by service name.
+  statement {
+    sid = "WriteVerdictAuditRecord"
+    actions = [
+      "dynamodb:PutItem",
+    ]
+    resources = [
+      aws_dynamodb_table.verdicts.arn,
+      "${aws_dynamodb_table.verdicts.arn}/index/*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "gate_stub" {
@@ -205,6 +239,11 @@ resource "aws_lambda_function" "gate_stub" {
       # one part of change context the change itself cannot influence.
       CODEDEPLOY_APP   = aws_codedeploy_app.demo_app.name
       CODEDEPLOY_GROUP = aws_codedeploy_deployment_group.demo_app.deployment_group_name
+
+      # Phase 3.4. Absent means the gate still produces and logs a verdict but
+      # records nothing -- which is a legitimate degraded mode, not a failure,
+      # for the same reason a failed audit write does not halt a judged deploy.
+      VERDICT_TABLE = aws_dynamodb_table.verdicts.name
     }
   }
 
