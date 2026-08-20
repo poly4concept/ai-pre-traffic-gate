@@ -533,6 +533,66 @@ account-wide. Nova avoids one symptom of it and not the cause.
 
 ---
 
+**Update (Phase 3.1) — the card was added, and two of the four claims above
+were wrong.**
+
+A payment method was attached to the account. Re-running the smoke test moved
+things forward and also corrected two conclusions recorded above.
+
+*What worked exactly as designed.* Running the check once as the admin profile
+created the Marketplace subscription (confirmed by an
+`aws-marketplace@amazonaws.com` subscription email for "Claude Haiku 4.5 (Amazon
+Bedrock Edition)"). The read-only `ai-agent` identity then got **past** that gate
+on the next run without holding any Marketplace permission of its own — the
+subscription is account-wide state, and only its *creation* needs
+`aws-marketplace:Subscribe`. The error changed from `AccessDeniedException` to
+`ThrottlingException`, which is again the "a changed error message is progress"
+lesson from point 2 above, now observed a second time.
+
+*Correction 1 — "every daily token quota is zero" was true but was the wrong
+question.* Listing quotas for Claude Haiku 4.5 and Nova Lite specifically showed
+that **tokens per MINUTE is also `0.0`**, along with requests per minute, for
+both models and in every routing variant (on-demand, cross-region, global
+cross-region). So the account does not have a used-up daily allowance; it has no
+on-demand inference entitlement at all. The `ThrottlingException` message names
+the daily limit, but the daily limit is not the binding constraint — it is merely
+the one the error text mentions.
+
+*Correction 2 — "none of them are adjustable, a support request cannot raise
+them" was overstated.* It holds for the daily family. It does not hold for the
+per-minute family:
+
+```text
+L-CCA5DF70  Cross-region model inference requests per minute, Claude Haiku 4.5  0.0  Adjustable: True
+L-58BE175A  Cross-region model inference tokens per minute,   Claude Haiku 4.5  0.0  Adjustable: True
+L-6120CF2D  Model invocation max tokens per day,              Claude Haiku 4.5  0.0  Adjustable: False
+```
+
+A self-service quota increase *is* possible, on the per-minute limits. The daily
+limits appear to be derived rather than set independently, so the per-minute
+grant is the lever.
+
+**The lesson, and it is a better one than the original four:** the shape of the
+query decided the shape of the conclusion. The error said *"Too many tokens per
+day"*, so the quota list was filtered on `tokens per day` — and every row that
+came back said `0.0 / Adjustable: False`, which felt like a complete answer
+precisely because it was so uniform. The binding constraint, and the only
+adjustable lever, sat in a family that filter never returned.
+
+Point 3 above congratulates Service Quotas for "answering in one call what four
+invocations only implied". That was true and also premature: the one call
+answered the question that had been asked, and the question had been copied
+verbatim from an error message written by the service that was refusing to
+explain itself. An error message tells you which limit tripped first, not which
+limit is lowest, and those are different facts.
+
+Worth carrying into the gate's own design, because it is the same failure the
+whole project is about: **a confident, uniform-looking answer to a narrow query
+is the most convincing kind of wrong.** Every `0.0 / Adjustable: False` row was
+accurate. The aggregate conclusion drawn from them was not.
+
+---
+
 ## F-010 — Amazon Inspector reports "no vulnerabilities" for a service it has never scanned
 
 **Phase:** 2.3

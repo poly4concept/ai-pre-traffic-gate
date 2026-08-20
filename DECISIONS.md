@@ -781,6 +781,158 @@ be genuinely useful on its own.
 
 ---
 
+## D-031 — Risk is a three-value enum, not a numeric score
+
+**Decision:** the model returns `low` | `medium` | `high`. Not 0-100, not a
+float.
+
+**Why:** the executor has to branch, so a score needs a threshold — and the
+threshold then *becomes* the policy. It would sit in a config file, unversioned
+and unexplained, quietly doing the actual deciding while the impressive-looking
+number did nothing. Three named levels put the policy where a human can read it,
+in `ACTION_FOR_RISK`.
+
+Secondary benefit: an enum forbids `medium-high`, which free text invites. And
+because there are exactly three levels and exactly three actions, the mapping is
+total by construction — there is no "what do we do with 61?" case.
+
+**Cost, stated honestly:** we lose resolution. A score could distinguish a
+barely-medium from an almost-high, and Phase 4 might find that we want that. If
+so the right move is a fourth level with its own named action, not a float —
+because the thing that made this decision good was the mapping being legible,
+not the number of levels being small.
+
+---
+
+## D-032 — The model's vocabulary contains no action words
+
+**Decision:** the verdict schema has no field the model can use to say *deploy*,
+*halt*, or *proceed*. It describes risk only. Code maps risk to action.
+
+**Why this is a security control and not just tidiness:** from Phase 2 on, the
+gate's input includes commit messages, branch names, and file paths. On any
+repository that accepts pull requests, that is attacker-influenced text, and from
+Phase 3 it is fed to a model whose output steers a decision. Prompt injection
+against that model is not hypothetical, and the design assumption is that it will
+sometimes succeed.
+
+If the model's output vocabulary included the word "deploy", a successful
+injection would need to produce **exactly one token** to get what it wanted.
+Because the vocabulary is purely descriptive, the most an injection can achieve
+is to *misdescribe the change* — and it then still has to get past a mapping it
+cannot influence, into an executor whose IAM role this process does not hold.
+
+**The general shape:** restricting what a model is *able to say* is cheaper and
+more reliable than trying to make it say the right thing. It is a structural
+mitigation, so it holds regardless of how good the prompt is or how the model
+behaves. `test_the_model_vocabulary_contains_no_action_words` asserts it so a
+later convenience field cannot quietly undo it.
+
+---
+
+## D-033 — The schema is a prompt; validation is the contract
+
+**Decision:** we validate tool input ourselves, in `verdict/validation.py`, and
+treat the JSON Schema sent to Bedrock as a steer rather than a guarantee.
+
+**Why, and this is the single most load-bearing fact in Phase 3:** *Bedrock does
+not validate tool input against the schema you give it.* Almost everything about
+the Converse tool-use API implies otherwise — you declare a JSON Schema, you set
+`toolChoice` to force the tool, and back comes a neat JSON object. It is very
+easy to conclude the platform enforced the contract. It did not. The schema
+reaches the model as context and shapes generation; it is a strong steer, not a
+gate. Models can and do return out-of-enum values, missing fields, and numbers
+outside a stated range.
+
+So the fail-closed guarantee rests entirely on our own validator. If this project
+has one slide-worthy sentence, it is that one.
+
+**What `toolChoice` does still buy:** the model cannot answer in prose, so we
+never parse English into a decision. That removes a whole class of failure. It
+just is not validation.
+
+**Drift risk, and the mitigation:** the advertised schema and the enforced rules
+live in different files, are edited at different times, and nothing about a
+passing test suite would notice them disagreeing. So the bounds are module
+constants imported by both, and `test_verdict_contract.py` asserts the field sets
+and the enum list match. Sharing constants makes the numbers impossible to
+desynchronise; the tests catch the names.
+
+---
+
+## D-034 — Reject type and shape errors; repair length and count overruns
+
+**Decision:** not every schema violation gets the same response.
+
+| Violation | Response | Why |
+| --- | --- | --- |
+| over-long `reasoning` or concern | truncate, record it | models cannot count characters |
+| too many concerns | trim the tail, record it | same, and the schema asks for most-important-first |
+| blank concern entry | drop it | a formatting artefact, not a claim |
+| `risk_level` case/whitespace | normalise | `"LOW"` is unambiguous |
+| out-of-enum `risk_level` | **reject** | no safe guess between medium and high |
+| wrong type anywhere | **reject** | evidence the contract was not understood |
+| missing or extra key | **reject** | a partial verdict is the ambiguous case |
+
+**Why the line falls there:** getting this wrong in either direction is costly.
+Reject everything and a model writing 615 characters of perfectly sound reasoning
+halts a deploy over punctuation — a self-inflicted outage, and the fastest way to
+get a gate switched off. Repair everything and a model that plainly misunderstood
+the task still gets to set the risk level.
+
+The distinction that resolves it: **a length overrun is a violation the model
+cannot help.** "At most 600 characters" is a request token generation has no
+character counter to honour precisely. A *type* error is different in kind — no
+model returns a string where a number belongs while understanding the contract.
+The moment we have evidence of misunderstanding, the `risk_level` in that same
+object stops deserving trust.
+
+Both branches are safe, which is what makes the distinction affordable: a
+rejection becomes a fail-closed `HIGH`, and a repair only ever shortens text
+nobody acts on.
+
+**One deliberate oddity:** a malformed `confidence` is rejected even though
+confidence never routes anything. The reason is not that the number matters — it
+is recorded and ignored. The reason is that the *error* matters, and it applies
+to the whole object.
+
+**Also — the Python trap worth showing an audience:** `isinstance(True, int)` is
+`True`. Without an explicit `bool` check, a model returning `true` for
+`confidence` validates as `1.0` — inside the allowed range, and completely
+meaningless. `bool` is checked before `int` for that reason.
+
+---
+
+## D-035 — A fail-closed verdict has no confidence, and records that it is one
+
+**Decision:** `Verdict.fail_closed()` sets `risk_level = HIGH`,
+`confidence = None`, and `source = FAIL_CLOSED`. `__post_init__` makes it an
+error for a fail-closed verdict to carry a confidence, and an error for a
+model-sourced one to lack it.
+
+**Why `None` and not `0.0`:** this is D-026 — an absent signal is not a negative
+signal — applied one layer up. The model never supplied a confidence; we received
+nothing. `0.0` would fabricate a measurement, and Phase 4 would then average it
+in alongside real ones.
+
+**Why `HIGH` and not a fourth level:** "halt and escalate to a human" is already
+exactly what CLAUDE.md asks for when the model or a signal is missing. Reusing
+`HIGH` means the executor keeps **three** branches no matter how many new ways
+the gate learns to fail.
+
+**Why `source` then has to exist:** a fail-closed `HIGH` and a model-assessed
+`HIGH` produce identical behaviour but mean completely different things. Without
+this field, a week of Bedrock throttling would read as a week of the gate
+correctly catching risky changes — the most flattering possible way to be wrong,
+and the kind of metric that survives all the way into a conference slide before
+anybody checks it.
+
+**And `truncated_fields`:** if D-034 shortens a string, the record says so.
+Otherwise a truncated `reasoning` is indistinguishable from one the model wrote
+short, and an audit trail that quietly rewrites its evidence is worse than none.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default
