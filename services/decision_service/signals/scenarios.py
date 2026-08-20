@@ -56,7 +56,9 @@ SAFE_DEPENDENCY_BUMP = ChangeContext(
     lines_added=1,
     lines_removed=1,
     paths=("requirements.txt",),
-    deploys_last_24h=1,
+    # 0, not 1: the last deploy was 26.5 hours ago, which is outside the 24-hour
+    # window. A quiet service that shipped something the previous afternoon.
+    deploys_last_24h=0,
     hours_since_last_deploy=26.5,
 )
 
@@ -89,7 +91,11 @@ RISKY_PAYMENTS_CHANGE = ChangeContext(
         "services/payments/ledger.py",
         "services/auth/tokens.py",
     ),
-    deploys_last_24h=1,
+    # 0, not 1: the last deploy was 71 hours ago, so there cannot have been one
+    # inside the 24-hour window. Caught in Phase 3.2 by reading a rendered prompt
+    # and noticing the two numbers contradicted each other --
+    # test_scenario_cadence_is_internally_consistent now enforces it.
+    deploys_last_24h=0,
     hours_since_last_deploy=71.0,
 )
 

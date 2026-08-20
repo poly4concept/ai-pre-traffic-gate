@@ -778,3 +778,77 @@ have opposite implications. Recorded explicitly as `has_alarm_coverage`.
 3. **The defensive guard can be the bug.** `sum(values) or 0` exists to prevent a
    crash on empty input. It succeeds, and in doing so converts a loud failure
    into a silent falsehood. Preferring the crash would have been safer.
+
+---
+
+## F-013 — Two eval fixtures described states that cannot exist
+
+**Phase:** 3.2
+
+**How it surfaced:** not from a test. From printing one rendered prompt to check
+the formatting looked sane, and reading this:
+
+```text
+<deploy_cadence>
+  deploys_in_last_24h: 1
+  hours_since_last_deploy: 71.0
+```
+
+One deploy inside the last 24 hours, and the last deploy 71 hours ago. Both
+numbers are individually plausible. Together they are impossible.
+
+`SAFE_DEPENDENCY_BUMP` had the same shape — `deploys_last_24h=1` with
+`hours_since_last_deploy=26.5` — and being the default change in four of the ten
+scenarios, it was the more widely spread of the two.
+
+**Why nothing caught it.** Every existing test on these fixtures asserted single
+values: that timestamps were fixed, that cadence rendered at all, that
+`is_rapid_succession` fired at the right threshold. Nothing asserted a
+*relationship between two fields*, and the contradiction lived entirely in the
+relationship. The dataclass was happy, the renderer was happy, the type checker
+was happy, and 312 tests were green.
+
+**Why it mattered more than a typo.** These ten scenarios are the seed of the
+Phase 4 eval harness — the measuring instrument for over-flagging and prompt
+drift. Two of the five change fixtures, feeding six of the ten scenarios, would
+have presented the model with a state the real world cannot produce. Any strange
+verdict on those scenarios would then have been attributed to the prompt, and
+"fix the prompt until the eval score improves" against a broken fixture is a
+loop that converges on nonsense.
+
+**The fix:** both set to `deploys_last_24h=0`, which is what "last deploy was
+over a day ago" actually means, plus
+`test_scenario_cadence_is_internally_consistent` parameterised over every
+scenario. It found the second instance immediately — the first was found by eye,
+the second by the test written because of the first.
+
+**Deliberately a test over fixtures, not an invariant on `ChangeContext`.** The
+tempting fix is to make the dataclass raise when the two fields disagree. That
+would be wrong in production: both numbers come from the same CodeDeploy query,
+and a deploy landing exactly on the 24-hour boundary, or a little clock skew,
+would then fail the entire change context and halt a pipeline over a rounding
+edge. Fixtures are held to a stricter standard than live data, because fixtures
+are the instrument and live data is the measurement.
+
+**Lessons:**
+
+1. **Rendering the artifact found what testing the artifact did not.** The tests
+   checked that fields appeared. Reading the output checked whether the output
+   made sense. Those are different questions, and only the second one notices
+   that two correct-looking numbers cannot both be true. Print the thing and
+   read it, at least once, especially for anything a model consumes.
+2. **Field-level assertions cannot see relational bugs.** Every test was correct
+   and the data was still wrong. Where two fields are derived from one
+   underlying fact, the invariant lives *between* them, and nothing that tests
+   them separately will ever look there.
+3. **A contradictory fixture is more dangerous than a malformed one.** Malformed
+   input fails loudly and gets fixed in minutes. This produced a real,
+   confident, plausible verdict on an impossible world — the same failure shape
+   as every other entry in this file, which is why it belongs here despite being
+   a two-character fix.
+4. **The measuring instrument needs its own tests.** The eval harness will be
+   trusted to say whether the prompt is getting better. Its fixtures were, until
+   now, the only part of the repository holding data that nothing verified.
+
+---
+

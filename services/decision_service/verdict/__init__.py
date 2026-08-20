@@ -8,12 +8,22 @@ about production.
                    risk-to-action mapping the model cannot reach
     schema.py      the tool schema handed to Bedrock. A prompt, not a contract.
     validation.py  the actual contract. Read this one closely.
+    prompt.py      the question: a signal bundle rendered for Converse
 
 Start with `schema.py`, specifically the note at the top: Bedrock does not
 validate tool input against the schema you give it. Everything else in this
 package follows from that single fact.
 """
 
+from .prompt import (
+    MAX_COMMIT_MESSAGE_CHARS,
+    MAX_FINDINGS_IN_PROMPT,
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    build_messages,
+    render_bundle,
+    system_blocks,
+)
 from .schema import (
     MAX_CONCERN_CHARS,
     MAX_CONCERNS,
@@ -36,6 +46,10 @@ from .validation import VerdictValidationError, parse_verdict
 
 __all__ = [
     "ACTION_FOR_RISK",
+    "MAX_COMMIT_MESSAGE_CHARS",
+    "MAX_FINDINGS_IN_PROMPT",
+    "PROMPT_VERSION",
+    "SYSTEM_PROMPT",
     "MAX_CONCERNS",
     "MAX_CONCERN_CHARS",
     "MAX_REASONING_CHARS",
@@ -49,6 +63,9 @@ __all__ = [
     "VerdictSource",
     "VerdictValidationError",
     "action_for",
+    "build_messages",
     "parse_verdict",
+    "render_bundle",
+    "system_blocks",
     "verdict_tool_config",
 ]
