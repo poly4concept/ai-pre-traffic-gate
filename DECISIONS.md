@@ -717,6 +717,70 @@ traffic — which is precisely the condition a deployment gate should notice.
 
 ---
 
+## D-029 — Deploy cadence comes from the control plane, not the build
+
+**Decision:** `deploys_last_24h` and `hours_since_last_deploy` are read by the
+gate from `codedeploy:ListDeployments`, carry `Provenance.AWS_API`, and a value
+supplied in the build payload is **ignored outright**.
+
+**Why not from the build,** which would have been simpler: deployment history
+lives in the CodeDeploy control plane. `buildspec.yml` cannot see it, and giving
+the build CodeDeploy permissions so it could would hand a repository file — one
+any pull request may edit — the ability to read and eventually influence
+deployment state.
+
+More importantly there is **no legitimate route** by which the build could know
+this. Diff statistics are self-reported because the build genuinely is the thing
+best placed to measure them; cadence is not. So a `deploys_last_24h` appearing
+in the payload could only be fabricated, and is discarded rather than labelled.
+
+**What this buys:** the first field in the bundle that the change being judged
+has no way to lie about. That makes the provenance labels describe genuinely
+different threat surfaces rather than being decoration:
+
+| Field group | Source | Can the change influence it? |
+| --- | --- | --- |
+| commit metadata | CodePipeline ← the connection | no |
+| diff statistics | a script in the repository | **yes** |
+| deploy cadence | CodeDeploy control plane | no |
+
+**Why cadence is worth the trouble at all:** it moves a verdict in both
+directions. Seven deploys in a day usually means somebody is chasing a problem,
+and the eighth is riskier than the first even with a three-line diff. Three weeks
+of silence means a large accumulated delta and cold operational reflexes. Neither
+fact appears anywhere in the change itself, which is precisely the kind of
+context a test suite cannot supply.
+
+---
+
+## D-030 — A cadence failure degrades one field, not the whole signal
+
+**Decision:** if the cadence collector fails, change context is still returned
+`OK` with `deploys_last_24h = None` and `Provenance.NONE`.
+
+**Why this is not a hole in the fail-closed design,** which it superficially
+resembles: change context has *already been established* at that point. We are
+declining to **add** to a signal, not accepting an unknown **in place of** one.
+
+The alternative — failing the whole change context because an enrichment call
+timed out — would turn a transient CodeDeploy hiccup into a blocked pipeline, on
+a signal the gate can reason perfectly well without. The fail-closed default
+exists for cases where the gate does not know what it is judging; this is not
+one of them.
+
+**The general shape:** "fail closed" is a rule about *the subject of a decision*,
+not about every field attached to it. Applying it indiscriminately produces a
+gate brittle enough that people route around it, which is a worse security
+outcome than a verdict made on three facts instead of four and honestly labelled.
+
+**Also:** the gate holds `codedeploy:ListDeployments` and
+`BatchGetDeployments` but **not** `CreateDeployment`, which stays with the
+executor. Splitting one service's actions across two roles is the concrete form
+of D-016, and it is only a meaningful split because the read half turned out to
+be genuinely useful on its own.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

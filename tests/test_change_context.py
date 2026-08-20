@@ -73,12 +73,31 @@ def test_collects_a_complete_change_context():
 
 
 def test_provenance_distinguishes_pipeline_facts_from_build_claims():
-    """The point of Phase 2.2. Same object, two trust levels."""
+    """The point of Phase 2.2. One object, three trust levels.
+
+    Diff statistics are the only thing the change gets to say about itself.
+    Commit metadata comes from CodePipeline's own read of the connection, and
+    from Phase 2.4b cadence comes from the CodeDeploy control plane -- so
+    `self_reported_fields` names exactly one group, not two.
+    """
     change = PipelineChangeContextCollector(make_event()).collect().data
 
     assert change.metadata_provenance is Provenance.PIPELINE
     assert change.diff_provenance is Provenance.BUILD
-    assert change.self_reported_fields == ("diff statistics", "deploy cadence")
+    assert change.self_reported_fields == ("diff statistics",)
+
+
+def test_cadence_is_absent_rather_than_self_reported_without_a_collector():
+    """The build cannot see deployment history, so it may not claim to.
+
+    Before 2.4b a `deploys_last_24h` in the build payload was read and labelled
+    BUILD. It is now ignored outright: there is no legitimate route by which the
+    build could know this, so a value there could only be fabricated.
+    """
+    change = PipelineChangeContextCollector(make_event({"deploys_last_24h": 99})).collect().data
+
+    assert change.deploys_last_24h is None
+    assert change.cadence_provenance is Provenance.NONE
 
 
 def test_commit_sha_comes_from_the_trusted_source_not_the_payload():

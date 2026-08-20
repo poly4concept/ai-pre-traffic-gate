@@ -47,11 +47,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
 from .collectors import ChangeContextCollector
 from .types import ChangeContext, Provenance
+
+logger = logging.getLogger(__name__)
 
 # CodePipeline caps UserParameters at 1000 characters. The build trims its
 # payload to fit; this is the last line of defence and exists so that a
@@ -131,8 +134,9 @@ class PipelineChangeContextCollector(ChangeContextCollector):
     to a model asked to judge a change it was never told about.
     """
 
-    def __init__(self, event: dict[str, Any]):
+    def __init__(self, event: dict[str, Any], cadence_collector: Any = None):
         self._event = event
+        self._cadence_collector = cadence_collector
 
     def _collect(self) -> ChangeContext:
         params = extract_user_parameters(self._event)
@@ -178,13 +182,7 @@ class PipelineChangeContextCollector(ChangeContextCollector):
                 "change context is incomplete"
             )
 
-        # Deploy cadence is genuinely absent here rather than zero. The build
-        # cannot see deployment history -- that is in the CodeDeploy control
-        # plane, which a build has no business reading. A dedicated collector
-        # with AWS_API provenance is the right home for it; until then the field
-        # is honestly empty.
-        raw_cadence = payload.get("deploys_last_24h")
-        cadence = None if raw_cadence is None else _as_int(raw_cadence)
+        cadence_count, cadence_hours, cadence_provenance = self._resolve_cadence()
 
         return ChangeContext(
             commit_sha=trusted_sha,
@@ -196,13 +194,46 @@ class PipelineChangeContextCollector(ChangeContextCollector):
             lines_added=_as_int(payload.get("lines_added")),
             lines_removed=_as_int(payload.get("lines_removed")),
             paths=tuple(str(p) for p in payload.get("paths", ())),
-            deploys_last_24h=cadence,
+            deploys_last_24h=cadence_count,
+            hours_since_last_deploy=cadence_hours,
             # The SHA, branch and author reach us via CodePipeline's own read of
             # the source connection. The diff numbers were produced by a script
             # inside the repository. Same object, two trust levels, recorded.
             metadata_provenance=Provenance.PIPELINE,
             diff_provenance=Provenance.BUILD,
-            cadence_provenance=(Provenance.NONE if cadence is None else Provenance.BUILD),
+            cadence_provenance=cadence_provenance,
+        )
+
+    def _resolve_cadence(self) -> tuple[int | None, float | None, Provenance]:
+        """Read deploy cadence from CodeDeploy, if a collector was supplied.
+
+        DELIBERATELY NOT from the build payload. The build cannot see deployment
+        history, so any cadence value appearing there would be fabricated --
+        and, unlike the diff statistics, there is no legitimate reason for it to
+        be self-reported at all.
+
+        A cadence failure degrades ONE FIELD, not the whole change context. The
+        gate can still judge a change it knows the size and timing of without
+        knowing the deploy rate; refusing the entire signal over a missing
+        enrichment would turn a minor CodeDeploy hiccup into a blocked pipeline.
+        That is a different trade from the fail-closed default, and the reason
+        it is different is that change context has already been established --
+        we are declining to add to it, not accepting an unknown in its place.
+        """
+        if self._cadence_collector is None:
+            return None, None, Provenance.NONE
+
+        result = self._cadence_collector.collect()
+        if not result.is_usable or result.data is None:
+            logger.warning("deploy cadence unavailable: %s", result.error)
+            return None, None, Provenance.NONE
+
+        return (
+            result.data.deploys_in_window,
+            result.data.hours_since_last_deploy,
+            # The first field in the bundle the change being judged cannot lie
+            # about: read from the AWS control plane, not from a repository file.
+            Provenance.AWS_API,
         )
 
 

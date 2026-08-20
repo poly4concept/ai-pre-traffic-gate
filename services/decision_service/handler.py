@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from signals import (
+    DeployCadenceCollector,
     DisabledCollector,
     InspectorFindingsCollector,
     MockChangeContextCollector,
@@ -193,6 +194,14 @@ SECURITY_SCANNING = os.environ.get("SECURITY_SCANNING", "true").strip().lower() 
 # collector has no standing cost and defaults on.
 HEALTH_WINDOW_MINUTES = int(os.environ.get("HEALTH_WINDOW_MINUTES", "60"))
 
+# The CodeDeploy application and deployment group whose history describes this
+# service's deploy cadence. Read-only: the gate holds ListDeployments and
+# BatchGetDeployments and deliberately NOT CreateDeployment, which stays with the
+# executor (D-016). Read and write on one service are separable, and this is
+# where that separation earns its keep.
+CODEDEPLOY_APP = os.environ.get("CODEDEPLOY_APP", "")
+CODEDEPLOY_GROUP = os.environ.get("CODEDEPLOY_GROUP", "")
+
 
 def collect_bundle(
     event: dict[str, Any],
@@ -216,7 +225,14 @@ def collect_bundle(
     """
     change_collector: Any
     if event.get("CodePipeline.job"):
-        change_collector = PipelineChangeContextCollector(event)
+        # Cadence is an enrichment of change context rather than a signal of
+        # its own, so it is injected into the change collector rather than
+        # occupying a fourth slot in the bundle. If it fails, one field is
+        # absent and the change context is still usable.
+        cadence = None
+        if CODEDEPLOY_APP and CODEDEPLOY_GROUP:
+            cadence = DeployCadenceCollector(CODEDEPLOY_APP, CODEDEPLOY_GROUP)
+        change_collector = PipelineChangeContextCollector(event, cadence_collector=cadence)
     else:
         # A direct invoke -- someone testing the function by hand. There is no
         # pipeline job and therefore no change to describe. Left as a mock with

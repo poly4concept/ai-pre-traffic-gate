@@ -110,10 +110,10 @@ data "aws_iam_policy_document" "gate_stub" {
 
   # Phase 2.4 -- read-only CloudWatch access for live target health.
   #
-  # GetMetricData covers all four Lambda metrics in a single request. DescribeAlarms
-  # is needed for a reason worth stating: an empty alarm list is ambiguous between
-  # "monitored and quiet" and "not monitored at all", and only enumerating the
-  # alarms distinguishes them.
+  # GetMetricData covers all four Lambda metrics in a single request.
+  # DescribeAlarms is needed for a reason worth stating: an empty alarm list is
+  # ambiguous between "monitored and quiet" and "not monitored at all", and only
+  # enumerating the alarms distinguishes them.
   #
   # `*` because neither action supports resource-level permissions -- CloudWatch
   # metrics have no ARNs. Both are reads: the gate cannot create an alarm, change
@@ -126,6 +126,29 @@ data "aws_iam_policy_document" "gate_stub" {
       "cloudwatch:DescribeAlarms",
     ]
     resources = ["*"]
+  }
+
+  # Phase 2.4b -- deploy cadence, read-only.
+  #
+  # Note what is absent and must stay absent: codedeploy:CreateDeployment. The
+  # gate reads deployment history; the executor creates deployments. Splitting a
+  # single service's actions between two roles this way is the concrete form of
+  # "the thing that decides cannot be the thing that deploys" (D-016), and it is
+  # only meaningful because the read half is genuinely useful on its own.
+  #
+  # Unlike the two collectors above, these actions DO support resource-level
+  # permissions, so they are scoped to exactly one application and one
+  # deployment group rather than `*`.
+  statement {
+    sid = "ReadDeployHistory"
+    actions = [
+      "codedeploy:ListDeployments",
+      "codedeploy:BatchGetDeployments",
+    ]
+    resources = [
+      "arn:aws:codedeploy:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:deploymentgroup:${aws_codedeploy_app.demo_app.name}/${aws_codedeploy_deployment_group.demo_app.deployment_group_name}",
+      "arn:aws:codedeploy:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:application:${aws_codedeploy_app.demo_app.name}",
+    ]
   }
 }
 
@@ -177,6 +200,11 @@ resource "aws_lambda_function" "gate_stub" {
       # collector, which reports UNAVAILABLE with a reason while Inspector is
       # switched off -- never a fabricated clean result.
       SECURITY_SCANNING = tostring(var.security_scanning)
+
+      # Deploy cadence is read from the CodeDeploy control plane, so it is the
+      # one part of change context the change itself cannot influence.
+      CODEDEPLOY_APP   = aws_codedeploy_app.demo_app.name
+      CODEDEPLOY_GROUP = aws_codedeploy_deployment_group.demo_app.deployment_group_name
     }
   }
 

@@ -37,6 +37,7 @@ from .collectors import (
     SecurityFindingsCollector,
     TargetHealthCollector,
 )
+from .deploy_cadence import DeployCadence, DeployCadenceCollector
 from .inspector import (
     InspectorFindingsCollector,
     InspectorNotEnabledError,
@@ -59,6 +60,8 @@ __all__ = [
     "Alarm",
     "ChangeContext",
     "ChangeContextCollector",
+    "DeployCadence",
+    "DeployCadenceCollector",
     "DeploymentTarget",
     "DisabledCollector",
     "MetricsUnavailableError",
