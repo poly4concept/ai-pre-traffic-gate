@@ -8,6 +8,21 @@
 
 locals {
   gate_stub_name = "${var.project_name}-gate"
+
+  # `us.anthropic.claude-...` -> `anthropic.claude-...`
+  #
+  # An inference profile is not a thing you are granted access to on its own. A
+  # call through `us.anthropic.*` authorises against BOTH the profile ARN and the
+  # underlying foundation-model ARN, and the profile decides at request time
+  # which region actually serves it. Naming only the profile produces an
+  # AccessDeniedException that points at a foundation-model ARN you never wrote
+  # down, which is a genuinely confusing hour (F-002).
+  bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(us|eu|apac)[.]/", "")
+
+  # The regions a `us.` profile may route to. Listed rather than wildcarded so
+  # the blast radius of the grant is written down: this role can invoke exactly
+  # one model, in exactly three regions.
+  bedrock_profile_regions = ["us-east-1", "us-east-2", "us-west-2"]
 }
 
 # Phase 2.2b: source_dir rather than source_file.
@@ -184,6 +199,31 @@ data "aws_iam_policy_document" "gate_stub" {
       "${aws_dynamodb_table.verdicts.arn}/index/*",
     ]
   }
+
+  # Phase 3.5 -- the verdict call itself.
+  #
+  # One model, three regions, one action. Note what is absent: no
+  # bedrock:CreateModelCustomizationJob, no bedrock:PutFoundationModelEntitlement,
+  # no aws-marketplace:Subscribe. The gate can ask an existing model a question
+  # and can do nothing else to the Bedrock control plane -- it cannot enable a
+  # model, change an entitlement, or run up a bill on anything but inference.
+  #
+  # InvokeModelWithResponseStream is deliberately excluded. The verdict is a
+  # single structured tool call that we validate as a whole; there is nothing to
+  # stream, and granting it would widen the surface for no capability.
+  statement {
+    sid     = "InvokeVerdictModel"
+    actions = ["bedrock:InvokeModel"]
+    resources = concat(
+      [
+        "arn:aws:bedrock:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
+      ],
+      [
+        for region in local.bedrock_profile_regions :
+        "arn:aws:bedrock:${region}::foundation-model/${local.bedrock_foundation_model_id}"
+      ],
+    )
+  }
 }
 
 resource "aws_iam_role_policy" "gate_stub" {
@@ -244,6 +284,10 @@ resource "aws_lambda_function" "gate_stub" {
       # records nothing -- which is a legitimate degraded mode, not a failure,
       # for the same reason a failed audit write does not halt a judged deploy.
       VERDICT_TABLE = aws_dynamodb_table.verdicts.name
+
+      # Phase 3.5. Which model forms the verdict. Env-driven so Phase 4 can
+      # sweep several models over one fixture set without a code change.
+      BEDROCK_MODEL_ID = var.bedrock_model_id
     }
   }
 

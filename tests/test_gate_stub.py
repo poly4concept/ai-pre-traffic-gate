@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import pytest
 from conftest import load_handler
 from signals import SignalStatus
+from verdict import ModelCall, RiskLevel, Verdict, VerdictOutcome, VerdictSource
 
 SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 
@@ -38,17 +39,95 @@ def load(monkeypatch, decision: str | None, mode: str | None):
     return load_handler("decision_service")
 
 
+# --- Fakes ----------------------------------------------------------------
+#
+# From 3.5 the gate talks to Bedrock and DynamoDB, so the whole path is exercised
+# with injected collaborators rather than by patching module globals. The
+# conftest guard makes this mandatory rather than merely tidy: it raises if a
+# test constructs a real boto3 client, which is how it caught the handler
+# building a bedrock-runtime client on a path that never calls Bedrock.
+
+
+class FakeVerdictClient:
+    """Stands in for BedrockVerdictClient. Returns a prepared outcome."""
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.bundles = []
+
+    def get_verdict(self, bundle):
+        self.bundles.append(bundle)
+        return self.outcome
+
+
+class FakeAuditWriter:
+    def __init__(self, status="written"):
+        self.status = status
+        self.items = []
+
+    def record(self, item):
+        self.items.append(item)
+        from verdict.audit import AuditWriteResult
+
+        return AuditWriteResult(self.status)
+
+
+def model_outcome(risk="low", *, confidence=0.9, reasoning="routine change", raw=None):
+    """A successful model verdict at the given risk level."""
+    verdict = Verdict(
+        risk_level=RiskLevel(risk),
+        reasoning=reasoning,
+        source=VerdictSource.MODEL,
+        confidence=confidence,
+    )
+    return VerdictOutcome(
+        verdict=verdict,
+        call=ModelCall(model_id="fake-model", prompt_version="test", attempts=1, succeeded=True),
+        raw_model_output=raw if raw is not None else {"risk_level": risk},
+    )
+
+
+def failed_outcome(reason="bedrock unreachable", *, kind="aws:ThrottlingException", raw=None):
+    """A fail-closed outcome, as the client produces when it cannot get one."""
+    return VerdictOutcome(
+        verdict=Verdict.fail_closed(reason),
+        call=ModelCall(
+            model_id="fake-model",
+            prompt_version="test",
+            attempts=3,
+            succeeded=False,
+            failure_kind=kind,
+            error=reason,
+        ),
+        raw_model_output=raw,
+    )
+
+
+def run(handler, monkeypatch, *, event=None, outcome=None, writer=None, ctx=None):
+    """Invoke the handler end to end with nothing reaching AWS."""
+    monkeypatch.setattr(handler, "report_to_codepipeline", lambda *a: None)
+    return handler.lambda_handler(
+        event if event is not None else {},
+        ctx or FakeContext(),
+        verdict_client=FakeVerdictClient(outcome or model_outcome()),
+        audit_writer=writer or FakeAuditWriter(),
+    )
+
+
 # --- The fail-closed matrix ----------------------------------------------
 #
-# Every unrecognised, missing, or malformed verdict must halt. Parametrised
-# rather than written out so that adding a new way to be wrong is a one-line
-# change, and so the list reads as a specification.
+# GATE_DECISION changed meaning in 3.5. It used to BE the verdict; it is now a
+# manual override that is normally unset. The direction of its default flipped
+# with it -- unset now means "no human intervened, use the model" rather than
+# "halt". Fail-closed did not weaken, it moved down a layer to the verdict
+# client, where the judgement actually happens.
+#
+# What did NOT change: an unrecognised value still halts.
+
+
 @pytest.mark.parametrize(
-    "decision",
+    "override",
     [
-        None,  # unset
-        "",  # set but empty
-        "   ",  # whitespace
         "ALLOWED",  # near-miss on the real value
         "yes",  # plausible synonym
         "true",  # plausible synonym
@@ -57,43 +136,105 @@ def load(monkeypatch, decision: str | None, mode: str | None):
         "allow; halt",  # injection-ish
     ],
 )
-def test_unrecognised_decisions_all_halt(monkeypatch, decision):
-    handler = load(monkeypatch, decision, "enforcing")
-    verdict = handler.lambda_handler({}, FakeContext())
+def test_an_unrecognised_override_halts(monkeypatch, override):
+    """A misspelled override is somebody steering the gate and missing.
 
-    assert verdict["decision"] == "halt"
-    assert verdict["action_taken"] == "halt_pipeline"
-    assert "failing closed" in verdict["decision_reason"]
+    That is exactly when guessing their intent is least appropriate, so it is
+    the one case where an override that was never validly requested still stops
+    the deploy.
+    """
+    handler = load(monkeypatch, override, "enforcing")
+
+    gate = run(handler, monkeypatch, outcome=model_outcome("low"))
+
+    assert gate["decision"] == "halt"
+    assert gate["action_taken"] == "halt_pipeline"
+    assert "failing closed" in gate["decision_reason"]
 
 
-def test_only_exact_allow_permits(monkeypatch):
+@pytest.mark.parametrize("unset", [None, "", "   "])
+def test_no_override_lets_the_model_decide(monkeypatch, unset):
+    """The new normal, and the behaviour change worth explaining on stage.
+
+    Before 3.5 an unset GATE_DECISION halted, because a gate with no way to form
+    an opinion has not approved anything. The gate now has a way, so "unset"
+    means the model's verdict stands.
+    """
+    handler = load(monkeypatch, unset, "enforcing")
+
+    gate = run(handler, monkeypatch, outcome=model_outcome("low"))
+
+    assert gate["decision"] == "allow"
+    assert "override" not in gate
+    assert "no manual override" in gate["decision_reason"] or gate["decision_reason"]
+
+
+def test_fail_closed_moved_down_a_layer_rather_than_away(monkeypatch):
+    """Unset override + a model that could not answer still yields a halt.
+
+    This is the test that shows the Phase 1 guarantee survived the refactor. The
+    halt is no longer produced by an env-var default; it is produced by the
+    verdict client, and it arrives here labelled `fail_closed`.
+    """
+    handler = load(monkeypatch, None, "enforcing")
+
+    gate = run(handler, monkeypatch, outcome=failed_outcome("bedrock throttled"))
+
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
+    assert gate["verdict_source"] == "fail_closed"
+
+
+def test_an_explicit_allow_override_is_recorded_even_when_it_agrees(monkeypatch):
+    """ "A human forced allow" and "the model said allow" are different events.
+
+    Only one of them means the gate was actually trusted, so the override is
+    recorded even when the two agree.
+    """
     handler = load(monkeypatch, "allow", "enforcing")
-    verdict = handler.lambda_handler({}, FakeContext())
 
-    assert verdict["decision"] == "allow"
-    assert verdict["action_taken"] == "none"
-    assert verdict["would_have_halted"] is False
+    gate = run(handler, monkeypatch, outcome=model_outcome("low"))
+
+    assert gate["decision"] == "allow"
+    assert gate["override"]["decision"] == "allow"
+    assert gate["model_decision"] == "allow"
 
 
-def test_allow_is_case_and_whitespace_tolerant(monkeypatch):
-    """Tolerant of formatting, not of meaning. `` ALLOW `` is still `allow``."""
+def test_an_allow_override_does_not_erase_what_the_model_thought(monkeypatch):
+    """The override wins the decision and loses the record.
+
+    `would_have_halted` still reflects the model, which is what makes an
+    override auditable rather than a way to make an inconvenient verdict vanish.
+    """
+    handler = load(monkeypatch, "allow", "enforcing")
+
+    gate = run(handler, monkeypatch, outcome=model_outcome("high"))
+
+    assert gate["decision"] == "allow"
+    assert gate["action_taken"] == "none"
+    assert gate["would_have_halted"] is True
+    assert gate["risk_level"] == "high"
+    assert gate["model_decision"] == "halt"
+
+
+def test_override_is_case_and_whitespace_tolerant(monkeypatch):
+    """Tolerant of formatting, not of meaning."""
     handler = load(monkeypatch, "  ALLOW  ", "enforcing")
 
-    assert handler.lambda_handler({}, FakeContext())["decision"] == "allow"
+    assert run(handler, monkeypatch)["decision"] == "allow"
 
 
-def test_explicit_halt_is_distinguishable_from_failed_closed(monkeypatch):
-    """A chosen halt and a defaulted halt must not look identical in the audit.
+def test_a_chosen_halt_is_distinguishable_from_a_failed_closed_one(monkeypatch):
+    """Same decision, unrelated events: the gate working vs the gate blind."""
+    chosen = run(load(monkeypatch, "halt", "enforcing"), monkeypatch)
+    failed = run(load(monkeypatch, None, "enforcing"), monkeypatch, outcome=failed_outcome())
 
-    Same decision, different reason. Operationally these are unrelated events:
-    one is the gate working, the other is the gate not knowing what it was asked.
-    """
-    chosen = load(monkeypatch, "halt", "enforcing").lambda_handler({}, FakeContext())
-    defaulted = load(monkeypatch, None, "enforcing").lambda_handler({}, FakeContext())
-
-    assert chosen["decision"] == defaulted["decision"] == "halt"
-    assert "explicitly configured" in chosen["decision_reason"]
-    assert "failing closed" in defaulted["decision_reason"]
+    assert chosen["decision"] == failed["decision"] == "halt"
+    assert "manually overridden" in chosen["decision_reason"]
+    assert failed["verdict_source"] == "fail_closed"
+    assert chosen["action_taken"] == "halt_pipeline"
+    # The Phase 3 restriction: the model's halt is recorded, not acted on.
+    assert failed["action_taken"] == "none"
 
 
 # --- Mode independence ----------------------------------------------------
@@ -101,91 +242,238 @@ def test_explicit_halt_is_distinguishable_from_failed_closed(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["shadow", "advisory"])
 def test_non_enforcing_modes_never_act(monkeypatch, mode):
-    """A halt verdict in shadow or advisory records but takes no action."""
+    """A halt in shadow or advisory records but takes no action."""
     handler = load(monkeypatch, "halt", mode)
-    verdict = handler.lambda_handler({}, FakeContext())
 
-    assert verdict["decision"] == "halt"
-    assert verdict["action_taken"] == "none"
-    # The field that makes shadow mode measurable rather than merely inert.
-    assert verdict["would_have_halted"] is True
+    gate = run(handler, monkeypatch)
+
+    assert gate["decision"] == "halt"
+    assert gate["action_taken"] == "none"
 
 
-def test_enforcing_mode_acts_on_halt(monkeypatch):
+def test_enforcing_mode_acts_on_a_human_halt(monkeypatch):
+    """The Phase 1 kill switch, still live and still demoable."""
     handler = load(monkeypatch, "halt", "enforcing")
 
-    assert handler.lambda_handler({}, FakeContext())["action_taken"] == "halt_pipeline"
+    assert run(handler, monkeypatch)["action_taken"] == "halt_pipeline"
 
 
 @pytest.mark.parametrize("mode", [None, "", "SHADOWY", "off", "disabled", "enforce"])
 def test_unrecognised_modes_become_enforcing(monkeypatch, mode):
     """An unreadable mode fails toward acting, not toward silence.
 
-    Note this fails in the opposite direction from an unreadable verdict, and
-    both choices point the same way: stop the deploy. A typo must not silently
+    This fails in the opposite direction from an unreadable verdict, and both
+    choices point the same way: stop the deploy. A typo must not silently
     disable the gate.
     """
     handler = load(monkeypatch, "halt", mode)
-    verdict = handler.lambda_handler({}, FakeContext())
 
-    assert verdict["mode"] == "enforcing"
-    assert verdict["action_taken"] == "halt_pipeline"
-    assert "mode_warning" in verdict
+    gate = run(handler, monkeypatch)
+
+    assert gate["mode"] == "enforcing"
+    assert gate["action_taken"] == "halt_pipeline"
+    assert "mode_warning" in gate
 
 
 def test_mode_does_not_alter_the_verdict(monkeypatch):
     """Mode gates the action only. The recorded decision is mode-independent."""
     decisions = {
-        mode: load(monkeypatch, "halt", mode).lambda_handler({}, FakeContext())["decision"]
+        mode: run(load(monkeypatch, "halt", mode), monkeypatch)["decision"]
         for mode in ("shadow", "advisory", "enforcing")
     }
 
     assert set(decisions.values()) == {"halt"}
 
 
+# --- The Phase 3 restriction ----------------------------------------------
+#
+# The gate now forms a real opinion and is deliberately not allowed to act on
+# it. These are the tests that will need updating in Phase 5, and that is the
+# point of writing them: the restriction is asserted, not assumed.
+
+
+def test_the_models_halt_is_recorded_and_not_acted_on(monkeypatch):
+    """Even in enforcing mode. Phase 3 is shadow-only for the MODEL's verdict."""
+    handler = load(monkeypatch, None, "enforcing")
+
+    gate = run(handler, monkeypatch, outcome=model_outcome("high"))
+
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
+    assert gate["action_taken"] == "none"
+    assert gate["model_verdict_can_act"] is False
+
+
+def test_a_human_halt_still_acts_while_the_models_does_not(monkeypatch):
+    """The asymmetry, stated directly.
+
+    A human typing `halt` is not the model acting, so the kill switch is not
+    subject to the Phase 3 restriction. Losing it during the shadow period would
+    be the wrong kind of caution.
+    """
+    by_model = run(load(monkeypatch, None, "enforcing"), monkeypatch, outcome=model_outcome("high"))
+    by_human = run(load(monkeypatch, "halt", "enforcing"), monkeypatch)
+
+    assert by_model["decision"] == by_human["decision"] == "halt"
+    assert by_model["action_taken"] == "none"
+    assert by_human["action_taken"] == "halt_pipeline"
+
+
+@pytest.mark.parametrize(
+    ("risk", "expected"),
+    [("low", "full_deploy"), ("medium", "canary"), ("high", "halt_and_escalate")],
+)
+def test_the_recommended_action_is_recorded_even_though_nothing_acts(monkeypatch, risk, expected):
+    """Shadow mode is only worth running if it records what it WOULD have done."""
+    handler = load(monkeypatch, None, "shadow")
+
+    gate = run(handler, monkeypatch, outcome=model_outcome(risk))
+
+    assert gate["recommended_action"] == expected
+    assert gate["action_taken"] == "none"
+
+
 # --- Audit record ---------------------------------------------------------
 
 
-def test_verdict_carries_the_fields_the_audit_trail_needs(monkeypatch):
-    handler = load(monkeypatch, "allow", "shadow")
-    verdict = handler.lambda_handler({}, FakeContext(aws_request_id="abc-123"))
+def test_the_gate_record_carries_the_fields_the_audit_trail_needs(monkeypatch):
+    handler = load(monkeypatch, None, "shadow")
+
+    gate = run(handler, monkeypatch, ctx=FakeContext(aws_request_id="abc-123"))
 
     for field in (
         "schema_version",
-        "source",
         "decision",
         "decision_reason",
         "mode",
         "action_taken",
         "would_have_halted",
+        "risk_level",
+        "recommended_action",
+        "verdict_source",
+        "confidence",
+        "model_call",
         "request_id",
         "timestamp",
+        "verdict_id",
     ):
-        assert field in verdict, f"missing audit field: {field}"
+        assert field in gate, f"missing audit field: {field}"
 
-    assert verdict["request_id"] == "abc-123"
-    assert verdict["source"] == "hardcoded-stub"
+    assert gate["request_id"] == "abc-123"
+    assert gate["schema_version"] == 1
+
+
+def test_the_verdict_is_written_to_dynamodb(monkeypatch):
+    handler = load_with_table(monkeypatch, None, "shadow")
+    writer = FakeAuditWriter()
+
+    gate = run(handler, monkeypatch, event=pipeline_event(), writer=writer)
+
+    assert gate["audit"] == "written"
+    assert len(writer.items) == 1
+    assert writer.items[0]["verdict_id"] == "job-1"
+
+
+def test_the_raw_model_output_reaches_the_record(monkeypatch):
+    """The disagreement between raw and validated is the point of the record.
+
+    Without this the failure path stores only the validator's complaint, and
+    "the model said 'critical'" -- exactly what Phase 4 needs to count -- is
+    lost.
+    """
+    handler = load_with_table(monkeypatch, None, "shadow")
+    writer = FakeAuditWriter()
+
+    run(
+        handler,
+        monkeypatch,
+        event=pipeline_event(),
+        outcome=failed_outcome(
+            "risk_level 'critical' is not valid",
+            kind="invalid_verdict:risk_level",
+            raw={"risk_level": "critical", "confidence": 0.8},
+        ),
+        writer=writer,
+    )
+
+    assert "critical" in writer.items[0]["raw_model_output"]
+    assert writer.items[0]["model_call"]["failure_kind"] == "invalid_verdict:risk_level"
+
+
+def test_an_override_is_persisted_in_the_record(monkeypatch):
+    """CLAUDE.md constraint 3: every verdict is auditable AND overridable."""
+    handler = load_with_table(monkeypatch, "allow", "shadow")
+    writer = FakeAuditWriter()
+
+    run(handler, monkeypatch, event=pipeline_event(), outcome=model_outcome("high"), writer=writer)
+
+    assert writer.items[0]["override"]["decision"] == "allow"
+    assert writer.items[0]["verdict"]["risk_level"] == "high"
+
+
+def test_a_failed_audit_write_does_not_halt_a_judged_deploy(monkeypatch):
+    """Storage trouble is not evidence about the change.
+
+    Same trade as D-030: the verdict is already made. The log line remains, so
+    the trail is degraded rather than lost.
+    """
+    handler = load_with_table(monkeypatch, None, "enforcing")
+
+    gate = run(
+        handler,
+        monkeypatch,
+        event=pipeline_event(),
+        outcome=model_outcome("low"),
+        writer=FakeAuditWriter("failed"),
+    )
+
+    assert gate["audit"] == "failed"
+    assert gate["decision"] == "allow"
+    assert gate["action_taken"] == "none"
+
+
+def test_without_a_table_the_gate_still_judges(monkeypatch):
+    """No VERDICT_TABLE is a degraded mode, not a failure."""
+    handler = load(monkeypatch, None, "shadow")
+
+    gate = run(handler, monkeypatch, event=pipeline_event())
+
+    assert gate["audit"] == "no_table_configured"
+    assert gate["decision"] == "allow"
+
+
+def test_the_verdict_id_is_the_pipeline_job(monkeypatch):
+    """One verdict per job, which is what makes the conditional write mean
+    something when CodePipeline invokes the same job twice."""
+    handler = load(monkeypatch, None, "shadow")
+
+    assert run(handler, monkeypatch, event=pipeline_event())["verdict_id"] == "job-1"
 
 
 def test_survives_a_context_missing_its_attributes(monkeypatch):
-    handler = load(monkeypatch, "allow", "shadow")
+    handler = load(monkeypatch, None, "shadow")
 
     class BareContext:
         pass
 
-    assert handler.lambda_handler({}, BareContext())["request_id"] == "unknown"
+    assert run(handler, monkeypatch, ctx=BareContext())["request_id"] == "unknown"
 
 
-def test_internal_failure_halts(monkeypatch):
-    """If verdict construction itself breaks, the result is still a halt."""
-    handler = load(monkeypatch, "allow", "enforcing")
-    monkeypatch.setattr(handler, "build_verdict", lambda _: 1 / 0)
+def test_a_crash_before_a_verdict_fails_closed(monkeypatch):
+    """The outermost boundary. Everything below it is written never to raise.
 
-    verdict = handler.lambda_handler({}, FakeContext())
+    If something does anyway, the gate knows nothing about the change, and
+    knowing nothing is grounds to stop.
+    """
+    handler = load(monkeypatch, None, "enforcing")
+    monkeypatch.setattr(handler, "collect_bundle", lambda _: 1 / 0)
 
-    assert verdict["decision"] == "halt"
-    assert verdict["action_taken"] == "halt_pipeline"
-    assert "internal error" in verdict["decision_reason"]
+    gate = run(handler, monkeypatch)
+
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
+    assert gate["verdict_source"] == "fail_closed"
+    assert gate["model_call"]["failure_kind"] == "gate_internal_error"
 
 
 # --- Signal collection (Phase 2.2b) --------------------------------------
@@ -308,54 +596,66 @@ def test_the_bundle_is_json_serialisable_for_the_audit_log(monkeypatch):
     assert payload["signals"]["target_health"]["status"] == "skipped"
 
 
-# --- Collection must not be able to break the gate ------------------------
+# --- Collection is no longer harmless ------------------------------------
+#
+# In Phase 2 a collection failure was logged and the verdict was unaffected,
+# because the verdict did not depend on signals. It does now, so these tests
+# assert the opposite of what they asserted one phase ago. Both versions were
+# correct for their phase, and the change is the interesting part.
 
 
-def test_collection_failure_leaves_the_verdict_untouched(monkeypatch):
-    """Phase 2 collects and logs. It must not change what the gate decides.
-
-    A signal-collection bug that halted every deploy would be a worse outcome
-    than one that degrades a single verdict, and until Phase 3 the verdict does
-    not depend on signals at all.
-    """
-    handler = load(monkeypatch, "allow", "enforcing")
+def test_a_collection_failure_now_fails_closed(monkeypatch):
+    """The Phase 2 test this replaces asserted the verdict was untouched."""
+    handler = load(monkeypatch, None, "enforcing")
     monkeypatch.setattr(handler, "collect_bundle", lambda _: 1 / 0)
-    monkeypatch.setattr(handler, "report_to_codepipeline", lambda *a: None)
 
-    verdict = handler.lambda_handler(pipeline_event(), FakeContext())
+    gate = run(handler, monkeypatch, event=pipeline_event())
 
-    assert verdict["decision"] == "allow"
-    assert verdict["action_taken"] == "none"
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
 
 
-def test_an_absent_change_context_does_not_yet_halt(monkeypatch):
-    """Phase 2 boundary, stated as a test so Phase 3 has to change it.
+def test_an_absent_change_context_now_halts(monkeypatch):
+    """The Phase 2 boundary test, now on the other side of the boundary.
 
-    `has_required_signals` is False here and the gate still allows, because
-    verdict logic is Phase 3's job. When that changes, this test should fail --
-    which is the point of writing it.
+    It was written to fail in Phase 3 -- `has_required_signals` is False here,
+    and the gate used to allow anyway because verdict logic did not exist yet.
+    The verdict client refuses to call Bedrock at all in this state, because a
+    model asked about a change it was never shown produces a confident, baseless
+    answer indistinguishable from a real one.
     """
-    handler = load(monkeypatch, "allow", "enforcing")
-    monkeypatch.setattr(handler, "report_to_codepipeline", lambda *a: None)
+    handler = load(monkeypatch, None, "enforcing")
 
-    verdict = handler.lambda_handler({}, FakeContext())
+    gate = run(handler, monkeypatch, outcome=failed_outcome("required signals missing"))
 
-    assert verdict["decision"] == "allow"
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
 
 
-def test_the_halt_path_still_works_with_signals_present(monkeypatch):
-    """The Phase 1 guarantee, re-asserted now that collection runs alongside."""
+def test_the_human_halt_path_still_works_with_signals_present(monkeypatch):
+    """The Phase 1 guarantee, re-asserted now that a model is in the loop."""
     handler = load(monkeypatch, "halt", "enforcing")
     reported = []
-    monkeypatch.setattr(handler, "report_to_codepipeline", lambda job, v: reported.append(v))
+    monkeypatch.setattr(handler, "report_to_codepipeline", lambda job, g: reported.append(g))
 
-    verdict = handler.lambda_handler(pipeline_event(), FakeContext())
+    gate = handler.lambda_handler(
+        pipeline_event(),
+        FakeContext(),
+        verdict_client=FakeVerdictClient(model_outcome("low")),
+        audit_writer=FakeAuditWriter(),
+    )
 
-    assert verdict["action_taken"] == "halt_pipeline"
+    assert gate["action_taken"] == "halt_pipeline"
     assert reported and reported[0]["decision"] == "halt"
 
 
 # --- Inspector wiring (Phase 2.3) ----------------------------------------
+
+
+def load_with_table(monkeypatch, decision, mode, table="verdicts-test"):
+    """Load the handler with a verdict table configured."""
+    monkeypatch.setenv("VERDICT_TABLE", table)
+    return load(monkeypatch, decision, mode)
 
 
 def load_with_env(monkeypatch, **env):

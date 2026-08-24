@@ -108,6 +108,7 @@ def build_record(
     action_taken: str,
     raw_model_output: Any = None,
     pipeline_execution_id: str | None = None,
+    override: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Assemble the audit item.
@@ -137,6 +138,14 @@ def build_record(
         "mode": mode,
         "action_taken": action_taken,
         "verdict": verdict.to_dict(),
+        # CLAUDE.md constraint 3: "every verdict is auditable and OVERRIDABLE",
+        # and an override nobody recorded is indistinguishable from the gate
+        # having decided that way on its own. Stored even when it agrees with the
+        # model, because "a human forced allow and the model also said allow" and
+        # "the model said allow" are different events -- only one of them means
+        # the gate was actually trusted. Empty map when nobody intervened, rather
+        # than absent, so the field is safe to query on.
+        "override": override or {},
         # --- how it was reached ------------------------------------------
         "model_call": call.to_dict(),
         # Before validation, exactly as the model produced it. See the module

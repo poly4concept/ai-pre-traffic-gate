@@ -111,14 +111,48 @@ variable "canary_interval_minutes" {
 # The stand-in for a verdict until Phase 3. Note there is no "unset" option and
 # no default of "allow": the Lambda fails closed on anything it does not
 # recognise, so the only way to permit a deploy is to say so explicitly.
+# Phase 3.5 changed what this means. It used to BE the verdict; it is now a
+# manual override, and the default is now empty rather than "allow".
+#
+# The direction of the default flipped with it. Before 3.5 an absent value meant
+# HALT, because a gate with no way to form an opinion has not approved anything.
+# The gate now forms its own opinion, so absent means "no human intervened, use
+# the model's verdict" -- and that verdict fails closed on its own when Bedrock
+# is unreachable or the signals are missing.
+#
+# Fail-closed did not weaken; it moved down to where the judgement happens. What
+# survives here is the kill switch: "halt" still stops the pipeline in enforcing
+# mode no matter what the model thinks, which is both the Phase 1 demo and the
+# thing you want on the day the model is wrong.
 variable "gate_decision" {
-  description = "Hardcoded verdict for the Phase 1 gate stub: allow | halt."
+  description = "Manual override for the gate: \"\" (none, use the model) | allow | halt."
   type        = string
-  default     = "allow"
+  default     = ""
 
   validation {
-    condition     = contains(["allow", "halt"], var.gate_decision)
-    error_message = "gate_decision must be exactly 'allow' or 'halt'."
+    condition     = contains(["", "allow", "halt"], var.gate_decision)
+    error_message = "gate_decision must be \"\" (no override), 'allow', or 'halt'."
+  }
+}
+
+# Which model produces the verdict.
+#
+# A variable rather than a constant because Phase 4 picks the real one on
+# measured over-flagging rate and cost per verdict, not on reputation -- and the
+# eval harness has to sweep several models over one fixture set without a code
+# change.
+#
+# Must be an inference-profile ID (the `us.` prefix), not a bare model ID. Most
+# current models are INFERENCE_PROFILE-only and a bare `anthropic.*` ID fails
+# with a ValidationException that does not mention profiles at all (F-002).
+variable "bedrock_model_id" {
+  description = "Bedrock inference profile ID used for the risk verdict."
+  type        = string
+  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  validation {
+    condition     = can(regex("^(us|eu|apac)\\.", var.bedrock_model_id))
+    error_message = "bedrock_model_id must be an inference profile ID, e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0."
   }
 }
 

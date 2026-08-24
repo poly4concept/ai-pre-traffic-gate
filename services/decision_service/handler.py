@@ -1,34 +1,46 @@
-"""The decision service. Hardcoded verdict (Phase 1) + real signals (Phase 2).
+"""The decision service. Phase 3.5 -- the model is now in the loop.
 
-The decision itself is still a single environment variable -- no Bedrock, no
-schema, no judgement. Everything *around* that variable is real: the fail-closed
-default, the three operating modes, the audit line, the CodePipeline contract,
-and since Phase 2.2b a genuine signal bundle collected from the pipeline event.
+Until this increment the verdict was a single environment variable. Everything
+around it was real -- signal collection, the fail-closed default, the three
+modes, the CodePipeline contract -- and the decision itself was a lookup. That
+was deliberate: Phase 1 proved the pipeline could be halted before any model
+existed, and Phase 2 proved the signals were real before anything consumed them.
 
-The signals are collected and logged but deliberately do not influence the
-verdict. That is Phase 3's job. Wiring collection in first, while the decision
-stays hardcoded, means that when a model finally arrives the signals feeding it
-are already known to be real -- the same reason Phase 1 built and proved the
-deploy path before any AI touched it.
+Now the four Phase 3 pieces are wired together:
 
-The point of building it this way is to make one claim testable before any model
-exists: *the pipeline can be halted, and the halt cannot be bypassed.* If that
-is not provably true with a hardcoded verdict, it will not become true by adding
-an LLM. This is the phase CLAUDE.md warns about skipping, and this file is the
-part people skip within it.
+    signals/          what the gate knows                   (Phase 2)
+    verdict/prompt    how it asks                           (3.2)
+    verdict/bedrock   asking, and failing closed            (3.3)
+    verdict/audit     writing down what happened            (3.4)
 
-Two behaviours here are worth reading closely, because they are the design:
+THE PHASE 3 RESTRICTION, STATED IN CODE
 
-1. FAIL CLOSED IS THE DEFAULT BRANCH, NOT AN EXCEPT HANDLER. An unset variable,
-   a typo, an unrecognised value, an unexpected exception -- every one of those
-   paths ends at `halt`, because `halt` is what the function does unless it is
-   specifically told otherwise. There is no `except: return allow` anywhere, and
-   there is no code path that reaches `allow` by accident.
+`MODEL_VERDICT_CAN_ACT = False`. The gate forms a real opinion, records it in
+full, and takes no action on it. That is CLAUDE.md's "shadow mode only", and it
+is one constant rather than a scattering of `if` statements so that Phase 5 is a
+visible, reviewable, one-line change rather than an archaeology exercise.
 
-2. MODE IS SEPARATE FROM VERDICT. The verdict says what the gate thinks; the
-   mode says whether anyone acts on it. Keeping them apart is what makes shadow
-   mode a real mode rather than a disabled feature -- in shadow the verdict is
-   computed and recorded in full, and then deliberately not acted upon.
+Shadow mode is worth more than it sounds. `would_have_halted` accumulates in
+DynamoDB from today, so by the time enforcement is switched on there is a real
+measured over-flagging rate to switch it on *with* -- rather than a guess and an
+apology.
+
+WHAT CHANGED ABOUT GATE_DECISION, AND WHY IT IS NOT A REGRESSION
+
+It used to be the verdict. It is now a manual OVERRIDE, and it is normally
+unset.
+
+The direction of its default flipped as a result, which is worth understanding
+rather than glossing: an unset `GATE_DECISION` used to mean HALT, because a gate
+with no way to form an opinion has not approved anything. The gate now has a way
+to form an opinion, so "unset" means "no human has intervened; use the model's
+verdict" -- and the model's verdict fails closed on its own when Bedrock is
+unreachable, the schema is violated, or the signals are missing.
+
+Fail-closed did not weaken. It moved down a layer, to where the judgement
+actually happens. What survives here is the kill switch: `GATE_DECISION=halt`
+still halts, in enforcing mode, no matter what the model thinks -- which is both
+the Phase 1 demo and the thing you want on the day the model is wrong.
 """
 
 from __future__ import annotations
@@ -49,136 +61,43 @@ from signals import (
     collect_signals,
 )
 from signals.types import DeploymentTarget
+from verdict import (
+    BedrockVerdictClient,
+    ModelCall,
+    Verdict,
+    VerdictAuditWriter,
+    VerdictOutcome,
+    build_bedrock_client,
+    build_dynamodb_client,
+    build_record,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# The stand-in verdict. Phase 3 replaces this single lookup with signal
-# collection plus a Bedrock call; nothing else in this file needs to change,
-# which is the test of whether the seam is in the right place.
-GATE_DECISION = os.environ.get("GATE_DECISION", "").strip().lower()
-
-# shadow | advisory | enforcing -- see variables.tf for what each means.
-GATE_MODE = os.environ.get("GATE_MODE", "").strip().lower()
+# --- Phase 3 restriction --------------------------------------------------
+#
+# The gate judges and records; it does not act. Phase 5 sets this True, adds the
+# executor's risk branching, and only then moves through advisory to enforcing.
+#
+# The manual override below is deliberately NOT subject to this flag: a human
+# typing `halt` is not the model acting, and losing the kill switch during the
+# shadow period would be the wrong kind of caution.
+MODEL_VERDICT_CAN_ACT = False
 
 ALLOW = "allow"
 HALT = "halt"
 
-VALID_DECISIONS = frozenset({ALLOW, HALT})
+VALID_OVERRIDES = frozenset({ALLOW, HALT})
 VALID_MODES = frozenset({"shadow", "advisory", "enforcing"})
 
-# Modes in which the gate is permitted to actually stop a deployment. Shadow and
-# advisory both record and report; only enforcing acts. Expressed as a set so
-# adding a mode later is a data change, not a new branch in the control flow.
+# Modes in which the gate may actually stop a deployment. Shadow and advisory
+# both record and report; only enforcing acts. A set so that adding a mode later
+# is a data change rather than a new branch in the control flow.
 BLOCKING_MODES = frozenset({"enforcing"})
 
-
-def resolve_decision(raw: str) -> tuple[str, str]:
-    """Map the configured value to a verdict. Anything unrecognised halts.
-
-    Returns (decision, reason). The reason exists so the audit record can
-    distinguish "someone chose to halt this" from "the gate could not tell what
-    it was being asked and defaulted to safety" -- operationally those are very
-    different events that would otherwise look identical in the logs.
-    """
-    if raw == ALLOW:
-        return ALLOW, "explicitly configured to allow"
-    if raw == HALT:
-        return HALT, "explicitly configured to halt"
-    if not raw:
-        # Not an error case to be handled -- the ordinary path for an
-        # unconfigured gate. A gate that does not know its verdict has not
-        # approved anything.
-        return HALT, "GATE_DECISION is not set; failing closed"
-    return HALT, f"GATE_DECISION={raw!r} is not a recognised verdict; failing closed"
-
-
-def resolve_mode(raw: str) -> tuple[str, str | None]:
-    """Map the configured mode. Anything unrecognised becomes enforcing.
-
-    Note which direction this fails. An unreadable *verdict* becomes `halt`; an
-    unreadable *mode* becomes `enforcing`. Both choices pick the outcome that
-    stops a deploy, because the failure we are unwilling to have is a bad change
-    reaching production because a config value was misspelled.
-
-    The consequence is a real cost, and it belongs on a slide: a typo in
-    GATE_MODE turns a shadow-mode rollout into an enforcing one, and the gate
-    starts blocking deploys nobody expected it to touch. That is the correct
-    trade -- an over-eager gate is visible within minutes, while a silently
-    disabled one is discovered by the incident it failed to prevent -- but it is
-    a trade, not a free win.
-    """
-    if raw in VALID_MODES:
-        return raw, None
-    if not raw:
-        return "enforcing", "GATE_MODE is not set; assuming enforcing"
-    return "enforcing", f"GATE_MODE={raw!r} is not a recognised mode; assuming enforcing"
-
-
-def build_verdict(request_id: str) -> dict[str, Any]:
-    """Assemble the audit record. Shaped like the Phase 3 verdict on purpose."""
-    decision, decision_reason = resolve_decision(GATE_DECISION)
-    mode, mode_warning = resolve_mode(GATE_MODE)
-
-    # The two independent questions, kept independent:
-    #   what does the gate think?      -> decision
-    #   is the gate allowed to act?    -> mode
-    blocking = decision == HALT and mode in BLOCKING_MODES
-
-    verdict: dict[str, Any] = {
-        "schema_version": 0,
-        "source": "hardcoded-stub",
-        "decision": decision,
-        "decision_reason": decision_reason,
-        "mode": mode,
-        "action_taken": "halt_pipeline" if blocking else "none",
-        "would_have_halted": decision == HALT,
-        "request_id": request_id,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
-    if mode_warning:
-        verdict["mode_warning"] = mode_warning
-
-    # `would_have_halted` is the field that makes shadow mode worth running. In
-    # shadow, `action_taken` is always "none" and carries no information; this
-    # is what you count to measure how often the gate would have blocked a
-    # deploy that in fact went out fine. That ratio is the over-flagging rate
-    # Phase 4 exists to measure, and Phase 8 exists to measure at scale.
-    return verdict
-
-
-def report_to_codepipeline(job: dict[str, Any], verdict: dict[str, Any]) -> None:
-    """Report the result back to CodePipeline, if we were invoked by one.
-
-    The contract is the reason this function exists at all: CodePipeline does not
-    read the response payload of a Lambda invoke action -- it waits for an
-    out-of-band PutJobSuccessResult or PutJobFailureResult call. A gate that
-    returns a beautifully structured "halt" verdict and never calls
-    PutJobFailureResult reports success to the pipeline, and the deploy proceeds.
-
-    That failure mode is silent, which is the only kind worth writing a comment
-    about: the logs show a halt verdict, the audit record shows a halt verdict,
-    and the change ships anyway.
-    """
-    import boto3
-
-    client = boto3.client("codepipeline")
-    job_id = job["id"]
-
-    if verdict["action_taken"] == "halt_pipeline":
-        # 265 characters is the documented ceiling on failureDetails.message.
-        # Truncating deliberately beats having the API reject the call and
-        # leaving the job hanging until it times out.
-        message = f"Gate halted deploy: {verdict['decision_reason']}"[:265]
-        client.put_job_failure_result(
-            jobId=job_id,
-            failureDetails={"type": "JobFailed", "message": message},
-        )
-        logger.info("Reported job failure to CodePipeline: %s", job_id)
-    else:
-        client.put_job_success_result(jobId=job_id)
-        logger.info("Reported job success to CodePipeline: %s", job_id)
-
+GATE_DECISION = os.environ.get("GATE_DECISION", "").strip().lower()
+GATE_MODE = os.environ.get("GATE_MODE", "").strip().lower()
 
 SERVICE_NAME = os.environ.get("TARGET_SERVICE", "ai-pre-traffic-gate-demo-app")
 
@@ -197,10 +116,170 @@ HEALTH_WINDOW_MINUTES = int(os.environ.get("HEALTH_WINDOW_MINUTES", "60"))
 # The CodeDeploy application and deployment group whose history describes this
 # service's deploy cadence. Read-only: the gate holds ListDeployments and
 # BatchGetDeployments and deliberately NOT CreateDeployment, which stays with the
-# executor (D-016). Read and write on one service are separable, and this is
-# where that separation earns its keep.
+# executor (D-016).
 CODEDEPLOY_APP = os.environ.get("CODEDEPLOY_APP", "")
 CODEDEPLOY_GROUP = os.environ.get("CODEDEPLOY_GROUP", "")
+
+# Env-driven because Phase 4 picks the real model on measured over-flagging rate
+# and cost per verdict, not on reputation. Changing it must not be a code change,
+# because the eval harness needs to sweep several models over one fixture set.
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+
+# Absent means the gate still judges and still logs, and records nothing durably.
+# A legitimate degraded mode rather than a failure, for the same reason a failed
+# write does not halt a judged deploy.
+VERDICT_TABLE = os.environ.get("VERDICT_TABLE", "")
+
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+
+def resolve_override(raw: str) -> tuple[str | None, str]:
+    """Map GATE_DECISION to a manual override, or to no override at all.
+
+    Returns (override, reason). `None` means nobody intervened and the model's
+    verdict stands -- the normal case, and the reason this function replaced
+    `resolve_decision` rather than being renamed.
+
+    Note that an *unrecognised* value still halts. A misspelled override is
+    somebody trying to steer the gate and failing, which is exactly when
+    guessing their intent is least appropriate.
+    """
+    if not raw:
+        return None, "no manual override; the model's verdict stands"
+    if raw == ALLOW:
+        return ALLOW, "manually overridden to allow"
+    if raw == HALT:
+        return HALT, "manually overridden to halt"
+    return HALT, f"GATE_DECISION={raw!r} is not a recognised override; failing closed"
+
+
+def resolve_mode(raw: str) -> tuple[str, str | None]:
+    """Map the configured mode. Anything unrecognised becomes enforcing.
+
+    Note which direction this fails. An unreadable *verdict* becomes a halt; an
+    unreadable *mode* becomes `enforcing`. Both pick the outcome that stops a
+    deploy, because the failure we are unwilling to have is a bad change reaching
+    production because a config value was misspelled.
+
+    The consequence is a real cost and belongs on a slide: a typo in GATE_MODE
+    turns a shadow rollout into an enforcing one. That is the correct trade -- an
+    over-eager gate is visible within minutes, a silently disabled one is
+    discovered by the incident it failed to prevent -- but it is a trade.
+    """
+    if raw in VALID_MODES:
+        return raw, None
+    if not raw:
+        return "enforcing", "GATE_MODE is not set; assuming enforcing"
+    return "enforcing", f"GATE_MODE={raw!r} is not a recognised mode; assuming enforcing"
+
+
+def resolve_action(*, decision: str, mode: str, from_override: bool) -> str:
+    """Decide whether the gate actually stops the pipeline.
+
+    Three independent questions, deliberately not collapsed into one boolean:
+
+        does the gate want to halt?      -> decision
+        is the gate allowed to act?      -> mode
+        is this the model or a human?    -> from_override
+
+    The third is what keeps Phase 3 honest. A model halt is recorded and not
+    acted on; a human halt still works. Written as early returns because the
+    equivalent boolean expression is four terms long and nobody reviewing it
+    would be certain which case they were looking at.
+    """
+    if decision != HALT:
+        return "none"
+    if mode not in BLOCKING_MODES:
+        return "none"
+    if from_override:
+        return "halt_pipeline"
+    if not MODEL_VERDICT_CAN_ACT:
+        # Phase 3: the gate has an opinion and no authority. Removing this line
+        # is what Phase 5 does.
+        return "none"
+    return "halt_pipeline"
+
+
+def build_gate_record(
+    *,
+    outcome: VerdictOutcome,
+    request_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Assemble the structured line that says what the gate decided and did."""
+    verdict = outcome.verdict
+    override, override_reason = resolve_override(GATE_DECISION)
+    mode, mode_warning = resolve_mode(GATE_MODE)
+
+    model_decision = HALT if verdict.is_blocking else ALLOW
+    decision = override if override is not None else model_decision
+
+    action_taken = resolve_action(decision=decision, mode=mode, from_override=override is not None)
+
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "decision": decision,
+        "decision_reason": override_reason if override else verdict.reasoning,
+        "mode": mode,
+        "action_taken": action_taken,
+        # The field that makes shadow mode worth running. In shadow,
+        # `action_taken` is always "none" and carries no information; this is
+        # what you count to measure how often the gate would have blocked a
+        # deploy that in fact went out fine. That ratio is the over-flagging
+        # rate Phase 4 measures and Phase 8 measures at scale.
+        "would_have_halted": model_decision == HALT,
+        "model_verdict_can_act": MODEL_VERDICT_CAN_ACT,
+        "risk_level": str(verdict.risk_level),
+        "recommended_action": str(verdict.action),
+        "verdict_source": str(verdict.source),
+        "confidence": verdict.confidence,
+        "primary_concerns": list(verdict.primary_concerns),
+        "model_call": outcome.call.to_dict(),
+        "request_id": request_id,
+        "timestamp": (now or datetime.now(UTC)).isoformat(),
+    }
+    if override is not None:
+        # Recorded even when it agrees with the model. "A human forced allow and
+        # the model also said allow" and "the model said allow" are different
+        # events, and only one of them means the gate was trusted.
+        record["override"] = {"decision": override, "reason": override_reason}
+        record["model_decision"] = model_decision
+    if mode_warning:
+        record["mode_warning"] = mode_warning
+
+    return record
+
+
+def report_to_codepipeline(job: dict[str, Any], gate: dict[str, Any]) -> None:
+    """Report the result back to CodePipeline, if we were invoked by one.
+
+    The contract is the reason this function exists: CodePipeline does not read
+    the response payload of a Lambda invoke action -- it waits for an
+    out-of-band PutJobSuccessResult or PutJobFailureResult call. A gate that
+    returns a beautifully structured "halt" verdict and never calls
+    PutJobFailureResult reports success, and the deploy proceeds.
+
+    That failure mode is silent, which is the only kind worth a comment: the logs
+    show a halt, the audit record shows a halt, and the change ships anyway.
+    """
+    import boto3
+
+    client = boto3.client("codepipeline")
+    job_id = job["id"]
+
+    if gate["action_taken"] == "halt_pipeline":
+        # 265 characters is the documented ceiling on failureDetails.message.
+        # Truncating deliberately beats having the API reject the call and
+        # leaving the job hanging until it times out.
+        message = f"Gate halted deploy: {gate['decision_reason']}"[:265]
+        client.put_job_failure_result(
+            jobId=job_id,
+            failureDetails={"type": "JobFailed", "message": message},
+        )
+        logger.info("Reported job failure to CodePipeline: %s", job_id)
+    else:
+        client.put_job_success_result(jobId=job_id)
+        logger.info("Reported job success to CodePipeline: %s", job_id)
 
 
 def collect_bundle(
@@ -208,27 +287,21 @@ def collect_bundle(
     security_collector: Any = None,
     health_collector: Any = None,
 ) -> Any:
-    """Collect the signal bundle. Phase 2 -- logged, and acted on by nothing.
-
-    Deliberately does NOT influence the verdict yet. Phase 2's job is to produce
-    a normalized bundle; Phase 3 is where a verdict starts depending on one.
-    Wiring collection in first, with the decision still hardcoded, means that
-    when the model arrives we already know the signals are real -- the same
-    reason Phase 1 built the deploy path before any AI touched it.
+    """Collect the signal bundle that the verdict will be based on.
 
     From Phase 2.4 all three collectors are real. Note what none of them are:
     mocks. A mock in this path would put fabricated health or security data into
     the audit trail of a real deployment, which is precisely the "absent signal
     read as a reassuring one" failure the package exists to prevent. Where a real
-    collector cannot answer, it says so -- UNAVAILABLE or DEGRADED with a reason,
+    collector cannot answer it says so -- UNAVAILABLE or DEGRADED with a reason,
     never a plausible zero.
     """
     change_collector: Any
     if event.get("CodePipeline.job"):
-        # Cadence is an enrichment of change context rather than a signal of
-        # its own, so it is injected into the change collector rather than
-        # occupying a fourth slot in the bundle. If it fails, one field is
-        # absent and the change context is still usable.
+        # Cadence is an enrichment of change context rather than a signal of its
+        # own, so it is injected into the change collector rather than occupying
+        # a fourth slot in the bundle. If it fails, one field is absent and the
+        # change context is still usable.
         cadence = None
         if CODEDEPLOY_APP and CODEDEPLOY_GROUP:
             cadence = DeployCadenceCollector(CODEDEPLOY_APP, CODEDEPLOY_GROUP)
@@ -268,13 +341,92 @@ def collect_bundle(
     )
 
 
-def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Evaluate the gate. Halts unless positively told to allow."""
-    request_id = getattr(context, "aws_request_id", "unknown")
+def judge(bundle: Any, verdict_client: Any = None) -> VerdictOutcome:
+    """Ask Bedrock for a verdict. Never raises.
 
-    # Collected before the verdict and logged separately, so that a bug in
-    # collection cannot take the gate's decision path down with it. In Phase 2
-    # the gate must keep working exactly as it did in Phase 1.
+    The client is constructed here rather than at module scope so that importing
+    this handler does not require boto3 or a region, and so tests can inject a
+    fake without patching a global. The wrapping try/except is belt and braces:
+    `BedrockVerdictClient.get_verdict` is written never to raise, and this
+    catches the case where constructing the client itself fails -- a missing
+    region, a bad model ID, boto3 unavailable in the runtime.
+    """
+    if verdict_client is None:
+        verdict_client = BedrockVerdictClient(BEDROCK_MODEL_ID, build_bedrock_client(AWS_REGION))
+    return verdict_client.get_verdict(bundle)
+
+
+def write_audit_record(
+    *,
+    bundle: Any,
+    outcome: VerdictOutcome,
+    gate: dict[str, Any],
+    verdict_id: str,
+    pipeline_execution_id: str | None,
+    writer: Any = None,
+) -> str:
+    """Persist the verdict. Returns a status string; never raises.
+
+    A storage failure degrades the audit trail rather than halting a deploy the
+    gate has already judged -- the same trade as D-030, for the same reason: the
+    verdict is already made, and DynamoDB being unavailable is not evidence about
+    the change. The verdict also reaches CloudWatch Logs on every path, so the
+    record is degraded, not lost.
+    """
+    if not VERDICT_TABLE:
+        return "no_table_configured"
+
+    if writer is None:
+        writer = VerdictAuditWriter(VERDICT_TABLE, build_dynamodb_client(AWS_REGION))
+
+    item = build_record(
+        verdict_id=verdict_id,
+        bundle=bundle,
+        verdict=outcome.verdict,
+        call=outcome.call,
+        mode=gate["mode"],
+        action_taken=gate["action_taken"],
+        raw_model_output=outcome.raw_model_output,
+        pipeline_execution_id=pipeline_execution_id,
+        override=gate.get("override"),
+    )
+    return writer.record(item).status
+
+
+def _pipeline_execution_id(job: dict[str, Any] | None) -> str | None:
+    """Best-effort extraction. Absent is fine; wrong would not be."""
+    if not job:
+        return None
+    context = job.get("data", {}).get("pipelineContext", {})
+    execution = context.get("pipelineExecutionId")
+    return execution if isinstance(execution, str) and execution else None
+
+
+def lambda_handler(
+    event: dict[str, Any],
+    context: Any,
+    *,
+    verdict_client: Any = None,
+    audit_writer: Any = None,
+) -> dict[str, Any]:
+    """Judge a deploy. Records everything; in Phase 3, acts on nothing.
+
+    The two keyword-only collaborators are never supplied by Lambda, which calls
+    this with exactly two positional arguments. They exist so the whole path --
+    collect, judge, record, report -- can be exercised offline with fakes,
+    without monkeypatching module globals and without an `if testing:` branch
+    inside the code being tested. Same discipline as the signal collectors.
+    """
+    request_id = getattr(context, "aws_request_id", "unknown")
+    job = event.get("CodePipeline.job")
+    # One verdict per pipeline job, which is the granularity a decision is
+    # actually made at, and what makes the conditional write meaningful when
+    # CodePipeline invokes the same job twice.
+    verdict_id = job.get("id") if job else request_id
+
+    bundle = None
+    outcome: VerdictOutcome | None = None
+
     try:
         bundle = collect_bundle(event)
         logger.info(json.dumps({"signal_bundle": bundle.to_dict()}))
@@ -283,43 +435,56 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             bundle.completeness_summary,
             bundle.has_required_signals,
         )
-        if not bundle.has_required_signals:
-            # Phase 3 turns this into a halt. Saying so out loud now means the
-            # log already shows what the gate WILL do, which is the same shadow
-            # -mode discipline applied to a feature that does not exist yet.
-            logger.warning(
-                "change context unavailable: %s -- from Phase 3 this routes to human review",
-                bundle.change.error,
+        outcome = judge(bundle, verdict_client=verdict_client)
+    except Exception as exc:  # noqa: BLE001 - this is the outermost fail-closed boundary
+        # Everything below this line is written never to raise. If something did
+        # anyway, the gate knows nothing about the change, and knowing nothing is
+        # grounds to stop. There is deliberately no recovery attempt.
+        logger.exception("signal collection or judgement failed; failing closed")
+        outcome = VerdictOutcome(
+            verdict=Verdict.fail_closed(
+                f"gate internal error before a verdict could be formed: {exc}"
+            ),
+            call=ModelCall(
+                model_id=BEDROCK_MODEL_ID,
+                prompt_version="unknown",
+                attempts=0,
+                succeeded=False,
+                failure_kind="gate_internal_error",
+                error=str(exc),
+            ),
+        )
+
+    gate = build_gate_record(outcome=outcome, request_id=request_id)
+    gate["verdict_id"] = verdict_id
+
+    # Written before the pipeline is told anything. If the audit write and the
+    # pipeline report disagree about ordering, the record of a halt should exist
+    # before the halt does -- not after.
+    if bundle is not None:
+        try:
+            gate["audit"] = write_audit_record(
+                bundle=bundle,
+                outcome=outcome,
+                gate=gate,
+                verdict_id=verdict_id,
+                pipeline_execution_id=_pipeline_execution_id(job),
+                writer=audit_writer,
             )
-    except Exception:
-        logger.exception("signal collection failed; continuing, verdict is unaffected in Phase 2")
+        except Exception:
+            # `write_audit_record` does not raise, so reaching here means the
+            # record could not even be BUILT. Still not grounds to halt a judged
+            # deploy; the log line below remains the audit trail.
+            logger.exception("could not build or write the audit record")
+            gate["audit"] = "failed"
+    else:
+        gate["audit"] = "no_bundle_to_record"
 
-    try:
-        verdict = build_verdict(request_id)
-    except Exception:
-        # There is no recovery path here and deliberately no attempt at one.
-        # If verdict construction itself failed we know nothing about the
-        # change, and knowing nothing is grounds to stop.
-        logger.exception("Verdict construction failed; failing closed")
-        verdict = {
-            "schema_version": 0,
-            "source": "hardcoded-stub",
-            "decision": HALT,
-            "decision_reason": "internal error during verdict construction; failing closed",
-            "mode": "enforcing",
-            "action_taken": "halt_pipeline",
-            "would_have_halted": True,
-            "request_id": request_id,
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
+    # One structured line per evaluation. Always emitted, on every path, which is
+    # what makes a DynamoDB failure a degradation rather than a loss.
+    logger.info(json.dumps(gate))
 
-    # One structured line per evaluation. Phase 3 adds the DynamoDB record;
-    # until then this log IS the audit trail, and it is already complete enough
-    # to answer "what did the gate decide, and did it act" after the fact.
-    logger.info(json.dumps(verdict))
-
-    job = event.get("CodePipeline.job")
     if job:
-        report_to_codepipeline(job, verdict)
+        report_to_codepipeline(job, gate)
 
-    return verdict
+    return gate

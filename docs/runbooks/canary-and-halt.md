@@ -178,6 +178,19 @@ moment it is deployed is how you lose your colleagues' goodwill in one
 afternoon. But it does mean "I set it to halt and nothing halted" is the first
 thing you will hit, and it is not a bug.
 
+### Second trap, new in Phase 3.5
+
+`gate_decision` is no longer the verdict — it is a manual **override**, and its
+default is now empty rather than `allow`. Empty means "no human intervened; use
+the model's verdict".
+
+There is a second reason a halt may not halt, and it is not this one. The
+model's verdict is recorded and deliberately **not acted on** during Phase 3
+(`MODEL_VERDICT_CAN_ACT = False` in the handler), so a model-assessed `high`
+shows `"would_have_halted": true` alongside `"action_taken": "none"` even in
+enforcing mode. A halt you typed yourself still acts. Phase 5 removes the
+restriction; until then, the two look different on purpose.
+
 ### The three cases worth demonstrating
 
 ```powershell
@@ -193,7 +206,7 @@ aws lambda invoke --function-name ai-pre-traffic-gate-gate `
 ```
 
 Case 3 is the one that matters, and Terraform will not let you create it — the
-`gate_decision` variable validates against `allow|halt`, so a typo cannot be
+`gate_decision` variable validates against `""|allow|halt`, so a typo cannot be
 applied through the normal path. Break it at the function directly:
 
 ```powershell

@@ -176,6 +176,18 @@ class VerdictOutcome:
 
     verdict: Verdict
     call: ModelCall
+    # What the model actually put in the tool call, before validation touched it.
+    #
+    # Carried out of the client rather than logged and dropped, because the audit
+    # record's central claim is that the raw answer and the accepted verdict can
+    # be compared. On the FAILURE path this is the only place a rejected answer
+    # survives at all -- `call.error` holds the validator's complaint, not the
+    # text that provoked it, and "the model said 'critical'" is precisely the
+    # detail Phase 4 needs to count.
+    #
+    # None when the model was never reached, or when the response was malformed
+    # enough that no tool arguments were found.
+    raw_model_output: Any = None
 
 
 class ModelResponseError(Exception):
@@ -320,12 +332,17 @@ class BedrockVerdictClient:
         attempts = 0
         last_error = "no attempt was made"
         last_kind = "unknown"
+        # Survives the loop so a rejected answer reaches the audit record. Only
+        # overwritten when an attempt actually produces tool arguments, so a
+        # later transport failure cannot erase an earlier bad answer.
+        last_raw: Any = None
 
         while True:
             attempts += 1
             try:
                 response = self._converse(bundle)
                 raw = extract_tool_input(response)
+                last_raw = raw
                 verdict = parse_verdict(raw, model_id=self._model_id)
 
             except Exception as exc:  # noqa: BLE001 - the whole point is that nothing escapes
@@ -362,6 +379,7 @@ class BedrockVerdictClient:
                     output_tokens=usage.get("outputTokens"),
                     stop_reason=response.get("stopReason"),
                 ),
+                raw_model_output=raw,
             )
 
         reason = f"could not obtain a valid verdict from Bedrock ({last_kind}): {last_error}"
@@ -375,6 +393,7 @@ class BedrockVerdictClient:
                 failure_kind=last_kind,
                 error=last_error,
             ),
+            raw_model_output=last_raw,
         )
 
     def _converse(self, bundle: SignalBundle) -> dict[str, Any]:

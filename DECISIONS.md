@@ -1378,6 +1378,101 @@ the finding is a code comment rather than a change.
 
 ---
 
+## D-048 — `GATE_DECISION` became an override, and its default flipped
+
+**Decision:** the environment variable that used to *be* the verdict is now a
+manual override. It is normally unset, and unset now means "use the model's
+verdict" rather than "halt".
+
+**Why the flip is not a weakening of fail-closed,** which is the obvious first
+reaction and worth answering directly:
+
+The old default halted because a gate with no way to form an opinion has not
+approved anything. That reasoning was correct *for a gate with no way to form an
+opinion*. The gate now has one — and that opinion fails closed on its own, in
+`BedrockVerdictClient`, when Bedrock is unreachable, the schema is violated, or
+the required signals are missing (D-040).
+
+Fail-closed did not go away. **It moved down a layer, to where the judgement
+actually happens.** Leaving the old default in place would have meant every
+deploy halting on an env var before the model was ever consulted, which is not
+caution, it is a disabled gate that looks like a working one.
+
+**What survives:** `GATE_DECISION=halt` still stops the pipeline in enforcing
+mode regardless of what the model thinks. That is the Phase 1 demo, and it is
+the thing you want on the day the model is wrong.
+
+**What did not change:** an *unrecognised* value still halts. A misspelled
+override is somebody trying to steer the gate and missing, which is exactly when
+guessing their intent is least appropriate.
+
+---
+
+## D-049 — One constant expresses the whole Phase 3 restriction
+
+**Decision:** `MODEL_VERDICT_CAN_ACT = False` in the handler. The gate forms a
+real verdict, records it in full, and takes no action on it — even in enforcing
+mode.
+
+**Why a named constant rather than simply not writing the enforcement code:**
+Phase 5 needs to be a visible, reviewable change, not an archaeology exercise.
+One constant and one early return in `resolve_action()` is a diff a reviewer can
+hold in their head. The alternative — enforcement logic scattered as absences
+across several functions — makes "is the gate allowed to act yet?" a question
+you answer by reading the whole file.
+
+**The asymmetry that makes it usable:** the manual override is deliberately NOT
+subject to the flag. A human typing `halt` is not the model acting, and losing
+the kill switch during the shadow period would be the wrong kind of caution.
+`resolve_action` takes `from_override` as an explicit third input for exactly
+this reason, written as early returns because the equivalent boolean expression
+is four terms long and nobody reviewing it would be sure which case they were
+looking at.
+
+**Why shadow mode is worth the whole increment:** `would_have_halted` starts
+accumulating in DynamoDB today. By the time enforcement is switched on there is
+a measured over-flagging rate to switch it on *with*, rather than a guess and an
+apology. A gate switched straight to enforcing has no such number and no way to
+get one.
+
+---
+
+## D-050 — The gate can invoke exactly one model, in exactly three regions
+
+**Decision:** `bedrock:InvokeModel` on one inference-profile ARN plus the
+underlying foundation-model ARN in `us-east-1`, `us-east-2`, and `us-west-2`.
+
+**Why three regions for one call:** a `us.` inference profile is not a resource
+you are granted access to on its own. A call through it authorises against
+*both* the profile ARN and the underlying foundation-model ARN, and the profile
+decides at request time which region actually serves the request. Naming only
+the profile produces an `AccessDeniedException` citing a foundation-model ARN
+you never wrote down — the same confusion as F-002, arriving from the other
+direction. The regions are listed rather than wildcarded so the blast radius is
+written down.
+
+**What is deliberately absent:**
+
+| Not granted | Why it matters |
+| --- | --- |
+| `bedrock:InvokeModelWithResponseStream` | the verdict is one structured tool call validated as a whole; there is nothing to stream |
+| `bedrock:PutFoundationModelEntitlement` | the gate cannot enable models |
+| `aws-marketplace:Subscribe` | the gate cannot create a billable subscription |
+| any `bedrock:*Customization*` | the gate cannot start a training job |
+
+The gate can ask one existing model one question. It cannot change anything
+about the Bedrock control plane, and it cannot run up a bill on anything except
+inference it was designed to perform.
+
+**Model ID is a variable, not a constant,** because Phase 4 picks the real model
+on measured over-flagging rate and cost per verdict rather than reputation, and
+the eval harness has to sweep several models over one fixture set without a code
+change. The variable validates that the ID is an inference profile (`us.`
+prefix); a bare `anthropic.*` ID fails with a `ValidationException` that does not
+mention profiles at all.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default
