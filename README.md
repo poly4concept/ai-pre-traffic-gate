@@ -233,7 +233,7 @@ Each phase must work before the next begins.
 | 2 | Signal collectors — common interface, mocks first, then real | done |
 | 2.5 | Synthesised-real signals — controllable faults, genuine findings | deferred until 3 is verified |
 | 3 | Verdict layer, shadow mode only | code complete, awaiting a live model call |
-| 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | not started |
+| 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | 4a done (22 labelled, harness + baseline); 4b awaits a live model |
 | 5 | Enforcement + escalation — executor, canary/halt, human override | not started |
 | 6 | Demo and talk assets | not started |
 | 7 | Company environment hardening | not started |

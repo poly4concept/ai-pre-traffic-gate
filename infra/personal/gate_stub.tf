@@ -17,12 +17,28 @@ locals {
   # which region actually serves it. Naming only the profile produces an
   # AccessDeniedException that points at a foundation-model ARN you never wrote
   # down, which is a genuinely confusing hour (F-002).
-  bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(us|eu|apac)[.]/", "")
+  bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(us|eu|apac|global)[.]/", "")
 
-  # The regions a `us.` profile may route to. Listed rather than wildcarded so
-  # the blast radius of the grant is written down: this role can invoke exactly
-  # one model, in exactly three regions.
-  bedrock_profile_regions = ["us-east-1", "us-east-2", "us-west-2"]
+  # If stripping a geography prefix changed the string, it was a profile ID.
+  bedrock_is_profile = local.bedrock_foundation_model_id != var.bedrock_model_id
+  bedrock_geography  = local.bedrock_is_profile ? split(".", var.bedrock_model_id)[0] : ""
+
+  # Which foundation-model ARNs the call might authorise against.
+  #
+  # A cross-region profile can be served from any region in its geography, and
+  # the request authorises against the foundation-model ARN in whichever one
+  # wins -- so all of them must be named or the call fails intermittently, which
+  # is a genuinely horrible way to discover an IAM gap. A bare model ID is served
+  # only where it was called, so one region is enough.
+  bedrock_geography_regions = {
+    "us"   = ["us-east-1", "us-east-2", "us-west-2"]
+    "eu"   = ["eu-north-1", "eu-west-1", "eu-central-1", "eu-west-3"]
+    "apac" = ["ap-southeast-2", "ap-northeast-1", "ap-south-1", "ap-southeast-1"]
+  }
+  bedrock_model_regions = try(
+    local.bedrock_geography_regions[local.bedrock_geography],
+    [var.bedrock_region],
+  )
 }
 
 # Phase 2.2b: source_dir rather than source_file.
@@ -216,12 +232,16 @@ data "aws_iam_policy_document" "gate_stub" {
     actions = ["bedrock:InvokeModel"]
     resources = concat(
       [
-        "arn:aws:bedrock:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
-      ],
-      [
-        for region in local.bedrock_profile_regions :
+        for region in local.bedrock_model_regions :
         "arn:aws:bedrock:${region}::foundation-model/${local.bedrock_foundation_model_id}"
       ],
+      # Only a profile ID needs a profile ARN. Granting one for a bare model ID
+      # would name a resource that cannot exist -- harmless, but it would put a
+      # line in the policy that no call ever authorises against, which is how
+      # least-privilege reviews start being ignored.
+      local.bedrock_is_profile ? [
+        "arn:aws:bedrock:${var.bedrock_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
+      ] : [],
     )
   }
 }
@@ -288,6 +308,11 @@ resource "aws_lambda_function" "gate_stub" {
       # Phase 3.5. Which model forms the verdict. Env-driven so Phase 4 can
       # sweep several models over one fixture set without a code change.
       BEDROCK_MODEL_ID = var.bedrock_model_id
+
+      # Separate from the Lambda's own region. Bedrock quota is provisioned per
+      # region and is zero in most of them on this account, so the gate deploys
+      # beside its pipeline and calls Bedrock wherever it can actually be served.
+      BEDROCK_REGION = var.bedrock_region
     }
   }
 

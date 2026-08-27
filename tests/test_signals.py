@@ -292,36 +292,62 @@ def test_insufficient_data_alarm_is_not_an_active_alarm():
 # --- Scenarios ------------------------------------------------------------
 
 
-def test_every_scenario_assembles_into_a_complete_bundle():
-    """Fixtures must be usable, not merely defined."""
-    for name, s in sc.SCENARIOS.items():
-        bundle = collect_signals(
-            target=sc.DEMO_TARGET,
-            change_collector=MockChangeContextCollector(s["change"]),
-            security_collector=MockSecurityFindingsCollector(s["security"]),
-            health_collector=MockTargetHealthCollector(s["health"]),
-            now=FIXED_NOW,
-        )
-        assert bundle.is_complete, f"scenario {name} did not assemble"
-        assert bundle.has_required_signals, name
+def test_every_scenario_assembles_into_a_bundle():
+    """Fixtures must be usable, not merely defined.
+
+    Assembly, not completeness. From Phase 4a three scenarios deliberately carry
+    an absent signal -- that is what they exist to test -- so requiring every
+    bundle to be complete would forbid the eval set from covering the case the
+    whole signals package was built around.
+    """
+    for name in sc.scenario_names():
+        bundle = sc.bundle_for(name)
+
+        assert bundle.target.service_name, name
+        assert bundle.collected_at.tzinfo is not None, name
+
+
+def test_only_the_scenarios_that_intend_an_absence_have_one():
+    """Guards against a fixture losing a signal by accident.
+
+    Without this, a typo in a scenario key silently produces a degraded bundle
+    and the eval quietly starts measuring something else.
+    """
+    intended = {
+        name
+        for name, s in sc.SCENARIOS.items()
+        if any(k.endswith(("_unavailable", "_skipped")) for k in s)
+    }
+    actual = {name for name in sc.scenario_names() if not sc.bundle_for(name).is_complete}
+
+    assert actual == intended
 
 
 def test_scenarios_are_frozen_in_time():
     """No scenario may depend on when the suite runs."""
     for name, s in sc.SCENARIOS.items():
-        assert s["change"].committed_at.year == 2026, name
-        assert s["change"].committed_at.tzinfo is not None, name
+        change = s.get("change")
+        if change is None:  # the deliberately absent-change scenario
+            continue
+        assert change.committed_at.year == 2026, name
+        assert change.committed_at.tzinfo is not None, name
 
 
 def test_scenario_set_spans_the_risk_space():
     """A fixture set that only contains easy cases measures nothing."""
-    changes = [s["change"] for s in sc.SCENARIOS.values()]
+    changes = [s["change"] for s in sc.SCENARIOS.values() if s.get("change") is not None]
 
     assert any(c.is_off_hours for c in changes)
     assert any(not c.is_off_hours for c in changes)
     assert any(c.total_lines_changed > 1000 for c in changes)
     assert any(c.total_lines_changed < 10 for c in changes)
     assert any(c.deploys_last_24h > 5 for c in changes)
+    # Phase 4a: the set must contain genuinely boring changes too, or the
+    # over-flagging rate is measured against nothing.
+    assert any(
+        c.total_lines_changed < 250 and not c.is_off_hours and "payments" not in " ".join(c.paths)
+        for c in changes
+    )
 
     healths = [s["health"] for s in sc.SCENARIOS.values()]
     assert any(h.has_active_alarm for h in healths)

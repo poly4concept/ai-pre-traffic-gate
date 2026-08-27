@@ -1473,6 +1473,150 @@ mention profiles at all.
 
 ---
 
+## D-051 — Labels are a set of acceptable answers, not one right answer
+
+**Decision:** every scenario carries `acceptable` (a set of defensible risk
+levels) and, separately, `ideal` (the single best answer, where one exists). The
+score is computed against `acceptable`. `ideal` is reported but is not a target.
+
+**Why:** for several scenarios a single label would be a lie. Is a 3,400-line
+refactor with no claimed behaviour change `medium` or `high`? Two competent
+engineers disagree. Forcing one answer builds that disagreement into the
+benchmark and then measures the model against a coin flip — and worse, the
+resulting number *looks* precise.
+
+**Why `ideal` is reported but never optimised toward:** it is my taste. Tuning a
+prompt until it matches my preferred answer on every fixture produces a gate
+calibrated to one person, which is exactly the thing a measured approach is
+supposed to replace.
+
+**The related discipline:** every label here was written **before a single
+inference was possible**, because the Bedrock quota was zero. That was luck, but
+it is the practice worth keeping. Labelling after seeing model output makes
+every borderline case drift toward whatever the model said — *"well, medium is
+defensible"* — and the accuracy figure then measures agreement with yourself.
+Grading the exam after reading the answer sheet.
+
+---
+
+## D-052 — Over-flagging and under-flagging are reported separately, never averaged
+
+**Decision:** two rates, two denominators, no combined "accuracy" figure
+anywhere in the report.
+
+| | means | consequence |
+| --- | --- | --- |
+| **under-flagging** | the gate waved a dangerous change through | the gate is useless |
+| **over-flagging** | the gate blocked a fine change | the gate gets switched off in week three, after which it prevents nothing |
+
+**Why they cannot be one number:** a gate at 85% accuracy is either nearly
+deployable or completely worthless depending entirely on which failures make up
+the other 15% — and the two need opposite fixes. A single figure hides the one
+thing you need to know before acting on it.
+
+The eval proves the point on itself: a client returning `high` to everything
+scores a **perfect** under-flagging rate. Averaged into one number it would look
+like a strong gate. There is a test asserting exactly that
+(`test_a_gate_that_says_high_to_everything_over_flags_completely`).
+
+**Consequence for the fixture set:** it is deliberately weighted toward benign
+changes — 11 of 22 should come back `low`. A real pipeline is mostly boring
+commits, and an eval set full of risky scenarios measures the over-flagging rate
+against almost nothing while rewarding a gate that flags everything.
+
+**Consequence for the exit code:** `evals/run.py` exits non-zero on
+under-flagging and structural violations only. Wiring over-flagging to a failing
+build would make the natural fix "relax the labels", which is how a benchmark
+quietly stops measuring anything.
+
+---
+
+## D-053 — Ordering assertions alongside absolute labels
+
+**Decision:** seven `PAIRS`, each asserting that one scenario must not come back
+*stricter* than another. Checked independently of the absolute labels.
+
+**Why this is the more robust half of the eval:** an absolute label depends on
+where the model's calibration happens to sit. A model uniformly one notch more
+cautious than me fails many absolute labels while being perfectly
+self-consistent, and arguably more useful than I am.
+
+Ordering does not have that problem. *"A revert must not be treated more harshly
+than the change it reverts"* holds regardless of calibration, so a violation is
+a genuine reasoning error rather than a difference of taste.
+
+Examples of what the pairs catch that absolute labels do not:
+
+- twenty LOW findings outranking one CRITICAL → severities are being **counted**, not read
+- an unfixable CVE outranking a fixable one that was ignored → the incentive is **inverted**: it punishes a vendor's abandonment and excuses ignoring a patch
+- a README typo ranking with a 612-line payments refactor because both are Friday evening → timing has become a **rule** rather than context
+
+---
+
+## D-054 — An attribute-counting baseline the model has to beat
+
+**Decision:** `evals/stub.py` scores a bundle by counting attributes — diff
+size, sensitive paths, off-hours, alarm state — and mapping the total to a risk
+level. It runs in the same harness against the same labels.
+
+**Why:** when the real model eventually scores, say, 80%, the immediate question
+is *"is that good?"* and there is no way to answer it without a comparison. The
+baseline is that comparison. If fifteen lines of arithmetic score the same,
+then whatever the model contributes on this set, it is not accuracy — and
+paying per token needs a different justification.
+
+**First run, before any model was available:**
+
+```
+UNDER-flagging   20.0%  (2/10)
+OVER-flagging     9.1%  (1/11)
+acceptable       85.7%  (18/21)
+```
+
+**85.7% from a scorer incapable of judgement** is the most useful number Phase 4
+has produced so far, and it is the one to put on a slide before showing any
+model result.
+
+Its three failures are precisely the scenarios that need reading rather than
+counting:
+
+- **`revert_of_a_bad_deploy`** — attribute score 8, every signal screaming halt, and halting is wrong. Recognising it requires understanding what a revert *is*.
+- **`first_deploy_in_a_month`** — 812 hours of accumulated drift, which no attribute reports.
+- **`untriaged_severity_findings`** — UNKNOWN severity rounded down to nothing.
+
+Deliberately **not** tuned to pass the eval. Tuning it would make it a second
+labelling of the fixtures rather than an independent comparison, and its
+failures are the interesting output.
+
+**One bug worth keeping in the record:** the first version listed `.txt` as an
+"inert" suffix, which matched `requirements.txt` — a dependency manifest — and
+cancelled the score for every critical CVE. The baseline is meant to be crude,
+not broken, and a suffix match that swallows the most important file in a Python
+repo is the second kind. It still produced a confident-looking number.
+
+---
+
+## D-055 — Contested scenarios are recorded, not scored
+
+**Decision:** `firefighting_hotfix` carries no label. It is excluded from
+pass/fail and its verdict distribution is reported instead.
+
+**Why:** three lines, seventh deploy of the day, Saturday 23:05, target in
+alarm. The case for halting is that seven deploys in a day is somebody flailing.
+The case against is that this is plausibly *the fix*, and blocking it extends an
+active outage. I do not know which is right.
+
+Labelling it either way would bake my guess into the benchmark and then score
+the model on matching it. Watching what the gate does with genuinely contested
+cases across hundreds of Phase 8 runs is more informative than a label I could
+not defend on stage.
+
+**The general principle:** a benchmark should measure what you actually know.
+Inventing ground truth to avoid a gap in the scoreboard converts uncertainty
+into a number, and a number is believed in a way a stated uncertainty is not.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

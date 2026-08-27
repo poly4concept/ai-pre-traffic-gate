@@ -132,6 +132,13 @@ VERDICT_TABLE = os.environ.get("VERDICT_TABLE", "")
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
+# Where Bedrock is called, which is not necessarily where this function runs.
+# Bedrock token quotas are provisioned per region and are zero in most of them
+# on this account (F-014), so the gate stays next to its pipeline and reaches
+# out to a region that can actually serve a request. DynamoDB and CodePipeline
+# stay local; only the model call travels.
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "").strip() or AWS_REGION
+
 
 def resolve_override(raw: str) -> tuple[str | None, str]:
     """Map GATE_DECISION to a manual override, or to no override at all.
@@ -352,7 +359,9 @@ def judge(bundle: Any, verdict_client: Any = None) -> VerdictOutcome:
     region, a bad model ID, boto3 unavailable in the runtime.
     """
     if verdict_client is None:
-        verdict_client = BedrockVerdictClient(BEDROCK_MODEL_ID, build_bedrock_client(AWS_REGION))
+        verdict_client = BedrockVerdictClient(
+            BEDROCK_MODEL_ID, build_bedrock_client(BEDROCK_REGION)
+        )
     return verdict_client.get_verdict(bundle)
 
 

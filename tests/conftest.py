@@ -24,6 +24,14 @@ _DECISION_SERVICE = str(SERVICES / "decision_service")
 if _DECISION_SERVICE not in sys.path:
     sys.path.insert(0, _DECISION_SERVICE)
 
+# The eval harness lives at the repo root rather than inside the decision
+# service, because `archive_file` zips that whole directory -- anything under it
+# ships to Lambda. A benchmark has no business in a production artifact, so the
+# repo root goes on the path instead.
+_REPO_ROOT = str(SERVICES.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 
 @pytest.fixture(autouse=True)
 def _no_real_aws(request, monkeypatch):

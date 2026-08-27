@@ -146,14 +146,43 @@ variable "gate_decision" {
 # current models are INFERENCE_PROFILE-only and a bare `anthropic.*` ID fails
 # with a ValidationException that does not mention profiles at all (F-002).
 variable "bedrock_model_id" {
-  description = "Bedrock inference profile ID used for the risk verdict."
+  description = "Bedrock model or inference-profile ID used for the risk verdict."
   type        = string
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
+  # Both forms are permitted, and the difference is not cosmetic:
+  #
+  #   us.anthropic.claude-...   an INFERENCE PROFILE. Routes across a geography,
+  #                             and authorises against both the profile ARN and
+  #                             the underlying foundation-model ARN wherever it
+  #                             lands (F-002).
+  #   amazon.nova-lite-v1:0     a BARE MODEL ID. Served only in the region
+  #                             called, authorises against one ARN.
+  #
+  # The original validation here demanded a profile prefix. That was correct
+  # advice and became a bug the moment the only combination this account can
+  # actually serve turned out to be a bare Nova ID in eu-north-1 -- the rule
+  # would have rejected the one thing that works.
   validation {
-    condition     = can(regex("^(us|eu|apac)\\.", var.bedrock_model_id))
-    error_message = "bedrock_model_id must be an inference profile ID, e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0."
+    condition     = can(regex("^([a-z]+[.])?[a-z0-9-]+[.][a-z0-9.:_-]+$", var.bedrock_model_id))
+    error_message = "bedrock_model_id must be a model ID (amazon.nova-lite-v1:0) or profile ID (us.anthropic.claude-haiku-4-5-20251001-v1:0)."
   }
+}
+
+# Which region the gate calls Bedrock in -- NOT necessarily where it runs.
+#
+# Bedrock token quotas are provisioned per region, and on this account they are
+# zero nearly everywhere (F-014). The Lambda therefore has to be able to reach a
+# region that works while staying deployed next to the pipeline it gates.
+#
+# Cross-region latency is a real cost of this and worth stating: eu-north-1 from
+# us-east-1 adds roughly 100-150ms round trip. Against a model call measured in
+# seconds it is noise, and the 30s Lambda timeout absorbs it. It would not be
+# noise for anything on a request path.
+variable "bedrock_region" {
+  description = "AWS region to call Bedrock in. May differ from the deployment region."
+  type        = string
+  default     = "us-east-1"
 }
 
 # Amazon Inspector bills per scanned function per hour, so this is the one

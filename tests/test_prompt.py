@@ -434,13 +434,16 @@ def test_the_same_bundle_renders_identical_bytes():
 
 
 def test_different_scenarios_render_differently():
-    """Guards against a rendering bug that drops the signals entirely."""
-    rendered = {
-        name: render_bundle(bundle(**{k: v for k, v in spec.items() if k != "note"}))
-        for name, spec in sc.SCENARIOS.items()
-    }
+    """Guards against a rendering bug that drops the signals entirely.
 
-    assert len(set(rendered.values())) == len(sc.SCENARIOS)
+    Uses `bundle_for` rather than assembling the collectors here, so the prompt
+    is rendered from exactly the bundle the eval harness scores. Two different
+    routes to a bundle is how a benchmark ends up measuring something the demo
+    never produces.
+    """
+    rendered = {name: render_bundle(sc.bundle_for(name)) for name in sc.scenario_names()}
+
+    assert len(set(rendered.values())) == len(rendered)
 
 
 def test_the_prompt_version_is_recorded_and_looks_like_a_version():
@@ -523,7 +526,9 @@ def test_scenario_cadence_is_internally_consistent(name):
     pipeline. Fixtures are held to a stricter standard than live data because
     fixtures are the measuring instrument.
     """
-    change = sc.SCENARIOS[name]["change"]
+    change = sc.SCENARIOS[name].get("change")
+    if change is None:  # the deliberately absent-change scenario
+        pytest.skip("scenario has no change context by design")
     count = change.deploys_last_24h
     gap = change.hours_since_last_deploy
 

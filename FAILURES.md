@@ -852,3 +852,247 @@ are the instrument and live data is the measurement.
 
 ---
 
+## F-014 — Three stacked gates, and an error that was not about the thing being tested
+
+**What happened:** four days of Bedrock being "not working" turned out to be
+three unrelated blockers stacked behind one another, each invisible until the one
+in front of it was cleared. Along the way I read one error as evidence for a
+conclusion it said nothing about, and told Mubaraka the problem was solved when
+it was not.
+
+**The three gates, in the order they surfaced:**
+
+| # | Error | Actual cause | Fix |
+| --- | --- | --- | --- |
+| 1 | `AccessDeniedException` … marketplace | no AWS Marketplace subscription for that model | one invocation by an admin |
+| 2 | `AccessDeniedException` … IAM | *our own* policy never listed AI21 or OpenAI | widen the policy |
+| 3 | `ThrottlingException: Too many tokens per day` | account daily token quota is `0` and non-adjustable | only AWS Support |
+
+Each fix revealed the next. That is the whole reason this took days: at no point
+was there a single wrong thing to find, and every fix felt like progress while
+the symptom stayed identical.
+
+### The mistake worth putting on a slide
+
+Testing AI21 Jamba, the response was:
+
+```
+ValidationException: This model doesn't support the toolConfig.toolChoice.tool field.
+```
+
+I read that as *"the request reached the model, so we are past the quota"* and
+said so. It was not. Re-running the same request without any `toolConfig` gave
+`AccessDeniedException` — the model had never been authorised at all.
+
+**Bedrock validates in stages: request shape → marketplace entitlement → quota.**
+The malformed `toolConfig` died at stage 1. An error from an early stage says
+nothing whatsoever about the later ones, and I treated a stage-1 rejection as a
+stage-3 pass.
+
+**The general lesson, which is the reusable part:** when probing whether access
+works, strip the request to the absolute minimum. Anything extra you send is
+another thing that can fail *first*, and a failure at stage 1 is
+indistinguishable — from the caller's seat — from success at stages 2 and 3.
+`scripts/subscribe_model.py` now sends a bare message with no tool config for
+exactly this reason.
+
+This is the same class of error as the absent-vs-zero trap that runs through
+Phase 2, arriving from a different direction: **an error that is not about the
+thing you are testing is worse than no error**, because it looks like data.
+
+### How the real cause was finally isolated
+
+The account showed `0` for every daily token quota, and `0` for almost every
+per-minute quota too — so a throttle on Claude or Nova was ambiguous. Two
+hypotheses fit equally well:
+
+* **A** — the daily `0` is a placeholder and the per-minute quotas bind
+* **B** — the daily `0` is genuinely enforced
+
+The sweep found exactly two models on the account with *non-zero* per-minute
+quota: AI21 Jamba 1.5 Mini and Large (3,000 TPM, 1 RPM). That made Jamba a
+controlled experiment — the only model where the two hypotheses predict
+different outcomes.
+
+With the subscription created and access confirmed working:
+
+```
+ai21.jamba-1-5-mini-v1:0
+  L-5A778346  tokens per minute      = 3,000   (non-zero)
+  L-0449ADC5  requests per minute    = 1       (non-zero)
+  L-103822BF  tokens per DAY         = 0       (non-adjustable)
+
+  -> ThrottlingException: Too many tokens per day
+```
+
+Hypothesis B, conclusively. The daily quota is enforced, it is zero, and it is
+not adjustable through Service Quotas — so no amount of per-minute quota helps
+and no self-service request can fix it.
+
+Note also what this rules out: consumption. The account has never completed a
+single successful inference call, so this is not an exhausted allowance. **The
+allowance is zero, which means the first token is already too many.**
+
+### The actual diagnosis, found by a rejected quota request
+
+Everything above assumed the account needed a quota INCREASE. It does not. The
+request was rejected with:
+
+```
+IllegalArgumentException: You must provide a quota value greater than
+the default quota value of 5000000.0
+```
+
+Service Quotas was refusing the request because 50,000 is *below* the default.
+Which meant the default was five million, and this account was sitting at zero.
+Comparing the two directly:
+
+| Quota | AWS default | Applied to this account |
+| --- | --- | --- |
+| Claude Haiku 4.5 cross-region TPM | 5,000,000 | **0** |
+| Nova Lite cross-region TPM | 8,000,000 | **0** |
+| Claude Haiku 4.5 cross-region RPM | 10,000 | **0** |
+| Claude Haiku 4.5 tokens per day | 3,600,000,000 | **0** |
+| AI21 Jamba 1.5 Mini TPM | 300,000 | **3,000** (1%) |
+
+Not a capacity problem. Every applied value on the account is either zero or one
+percent of the AWS default, across every provider including Amazon's own models.
+Jamba at exactly 1% is what rules out coincidence -- a single suppressed
+provisioning step, not a series of per-model decisions.
+
+**And there is no self-service route out of it.** `RequestServiceQuotaIncrease`
+only accepts values ABOVE the default, so the one API that could restore a
+normal quota refuses every value between 0 and 5,000,000 -- which is the entire
+range that would help. The mechanism for fixing this is structurally unable to
+fix this.
+
+**The lesson, and it generalises past AWS:** a rejected request is data. That
+`IllegalArgumentException` was not an obstacle to work around, it was the first
+thing in four days to state a number we had not already seen -- and the number
+was the whole diagnosis. Two commands (`get-aws-default-service-quota` and
+`get-service-quota`) then turned it into a table, and the table is the support
+case. Before that we had "it is throttled" and a plausible story; after it we
+had "applied is 0, default is 5,000,000, and your API will not let me change
+it", which is not arguable.
+
+**What we should have run on day one:** compare applied against default. Reading
+the applied value alone -- which is what the console shows and what the first
+sweep collected -- makes 0 look like a small number. Against a default of five
+million it is obviously a broken one.
+
+### The root cause, found in a region we had never tried
+
+Sweeping all fourteen Nova regions as the admin profile produced an error
+message that had never appeared in us-east-1:
+
+```
+eu-west-1        amazon.nova-micro-v1:0   DENIED
+    Your account is currently being verified. Verification norma...
+```
+
+**The account is under AWS verification.** Not a quota bug, not a provisioning
+defect, not a payment problem -- an account-level hold that suppresses inference
+capacity while it runs. Everything observed over five days is downstream of
+that one fact:
+
+* applied quotas of 0 against defaults in the millions
+* Jamba at exactly 1% of its default rather than 0
+* a single successful call in us-east-2, then nothing
+* `RequestServiceQuotaIncrease` refusing every value that would help
+
+And crucially it explains why **no amount of correct configuration helped**. We
+fixed three real problems on the way here -- the Marketplace subscription, the
+IAM policy, the payment method -- and each fix was genuinely necessary and
+changed nothing observable, because a fourth gate sat behind all of them.
+
+The sweep also found two regions that DID serve a request:
+
+```
+eu-north-1       amazon.nova-lite-v1:0    WORKS   10 tokens used
+ap-southeast-2   amazon.nova-lite-v1:0    WORKS   10 tokens used
+```
+
+**Why us-east-1 never showed the verification message** is the part worth
+keeping. It reported `ThrottlingException: Too many tokens per day` -- a
+capacity error -- for what is actually an entitlement hold. Only regions where
+the model was NOT already provisioned surfaced the real reason. So the most
+heavily used region gave the least informative error, and it was the only region
+we looked at for five days.
+
+**The generalisable lesson, and it is the same one as the `ValidationException`
+above:** an error message describes the first gate that rejected you, not the
+underlying condition. Sweeping the same call across many regions was worth more
+than any amount of re-reading a single region's response, because a different
+environment fails at a different stage and tells you something new.
+
+**Also worth noting for the talk:** the fix for this is to wait. Every technical
+avenue -- IAM, subscriptions, quota requests, support cases -- was orthogonal to
+the actual cause. The engineering skill on display here was not solving it; it
+was building all of Phase 3 and Phase 4a against fakes so that five days of
+being blocked cost nothing.
+
+### Cost of the detour
+
+Roughly four days of Phase 3 believing the blocker was a payment instrument,
+then a subscription, then IAM. The build was never actually blocked — 3.1
+through 3.5 were all written and tested offline against realistic fake
+responses — but "Bedrock works" was asserted three times before it was true, and
+each assertion was based on one gate clearing rather than on a successful call.
+
+**The rule that would have prevented all three premature claims:** the only
+evidence that a model call works is a model call that worked. Not a cleared
+error, not a subscription email, not a quota page. `check_bedrock_access.py`
+already encoded this — its step 3 is a real Converse call — and I talked past
+its FAIL output three separate times by explaining why the *next* thing would
+fix it.
+
+---
+
+---
+
+## F-015 — An IAM policy grown by debugging, and a 2048-byte wall
+
+**What happened:** applying the `ai-agent` Bedrock policy failed with
+
+```
+LimitExceeded: Maximum policy size of 2048 bytes exceeded for user ai-agent
+```
+
+**Why it had grown:** every dead end in the quota investigation added ARNs. AI21
+went in to test Jamba, DeepSeek and OpenAI to test whether any provider was
+unaffected, then five more regions when the region sweep found two that worked.
+Twenty-four resource ARNs, each individually justified at the moment it was
+added, none ever removed. 2,039 bytes of file and over the limit as submitted.
+
+**The real problem is not the limit.** It is that the policy had stopped
+describing what the identity *does* and started recording what we had *tried*.
+Nothing in it was wrong; it was a debugging log that happened to be enforced by
+IAM. A least-privilege review of it would have been meaningless, because the
+answer to "why can this identity invoke DeepSeek?" was "we were curious once".
+
+**Fix:** cut to four wildcarded ARNs covering the two model families this
+project will actually use, at 470 bytes.
+
+```json
+"arn:aws:bedrock:*::foundation-model/anthropic.*",
+"arn:aws:bedrock:*::foundation-model/amazon.nova-*",
+"arn:aws:bedrock:*:594380318102:inference-profile/*.anthropic.*",
+"arn:aws:bedrock:*:594380318102:inference-profile/*.amazon.nova-*"
+```
+
+**The region wildcard is a deliberate widening,** and worth being explicit about
+rather than quietly enjoying. Enumerating regions was the more precise thing to
+do, and it was also what made the policy unmaintainable -- every new region to
+test meant another edit, another apply, another line nobody would later remove.
+For an invoke-only grant to a read-only development identity on two named model
+families, `*` on the region is a good trade. It would not be for the gate's own
+execution role, which stays enumerated in `gate_stub.tf` for exactly that
+reason.
+
+**The generalisable bit:** inline user policies cap at 2048 bytes, which is
+small enough to hit by accident. Anything expected to grow belongs in a managed
+policy (6,144 bytes, attachable, versioned). But hitting the cap here was
+useful — it forced a cleanup that should have happened anyway, and the fact that
+a policy grew 6x during a debugging session without anyone noticing is the
+finding, not the limit.
+

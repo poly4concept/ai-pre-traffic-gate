@@ -48,3 +48,9 @@ Thumbs.db
 
 # --- Claude Code ---
 .claude/settings.local.json
+
+# --- Scratch output from CLI probing ---
+# `aws lambda invoke` and the Bedrock diagnostics write here; none of it is a
+# build artefact and none of it should be committed.
+response.json
+quota_sweep.json

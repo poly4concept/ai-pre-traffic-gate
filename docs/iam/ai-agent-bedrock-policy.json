@@ -4,28 +4,12 @@
     {
       "Sid": "InvokeCandidateVerdictModels",
       "Effect": "Allow",
-      "Action": [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream"
-      ],
+      "Action": "bedrock:InvokeModel",
       "Resource": [
-        "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.amazon.nova-*",
-        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-*",
-        "arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-*",
-        "arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-*",
-        "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.anthropic.*",
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.*",
-        "arn:aws:bedrock:us-east-2::foundation-model/anthropic.*",
-        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.*",
-        "arn:aws:bedrock:us-east-1::foundation-model/ai21.jamba-*",
-        "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.deepseek.*",
-        "arn:aws:bedrock:us-east-1::foundation-model/deepseek.*",
-        "arn:aws:bedrock:us-east-2::foundation-model/deepseek.*",
-        "arn:aws:bedrock:us-west-2::foundation-model/deepseek.*",
-        "arn:aws:bedrock:us-east-1::foundation-model/openai.*",
-        "arn:aws:bedrock:us-east-2::foundation-model/openai.*",
-        "arn:aws:bedrock:us-west-2::foundation-model/openai.*",
-        "arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.openai.*"
+        "arn:aws:bedrock:*::foundation-model/anthropic.*",
+        "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
+        "arn:aws:bedrock:*:594380318102:inference-profile/*.anthropic.*",
+        "arn:aws:bedrock:*:594380318102:inference-profile/*.amazon.nova-*"
       ]
     }
   ]
