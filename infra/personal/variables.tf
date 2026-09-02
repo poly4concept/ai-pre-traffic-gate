@@ -228,3 +228,59 @@ variable "verdict_store_deletion_protection" {
   type        = bool
   default     = true
 }
+
+# --- Phase 2.5b: alarm tuning ---------------------------------------------
+#
+# Variables rather than constants because the right values differ by audience.
+# A stage demo wants an alarm that trips inside one minute; a company rollout
+# wants one that does not page anyone over a blip. Same alarms, different
+# numbers, no code change.
+
+variable "alarm_error_rate_pct" {
+  description = "Error-rate percentage above which the demo app alarm fires."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.alarm_error_rate_pct > 0 && var.alarm_error_rate_pct < 100
+    error_message = "alarm_error_rate_pct must be between 0 and 100 exclusive."
+  }
+}
+
+variable "alarm_p99_latency_ms" {
+  description = "p99 duration in milliseconds above which the demo app alarm fires."
+  type        = number
+  default     = 2000
+}
+
+variable "alarm_period_seconds" {
+  description = "Metric period for the demo app alarms."
+  type        = number
+  default     = 60
+
+  # 60 is the finest STANDARD-resolution period. Anything below it silently
+  # becomes a high-resolution alarm at roughly three times the price, which is a
+  # surprising way to find out you changed the billing model.
+  validation {
+    condition     = var.alarm_period_seconds >= 60
+    error_message = "alarm_period_seconds below 60 makes these high-resolution alarms, which cost more."
+  }
+}
+
+variable "alarm_evaluation_periods" {
+  description = "Consecutive periods breaching before the alarm fires."
+  type        = number
+  default     = 1
+}
+
+# Whether a firing alarm rolls a canary back automatically.
+#
+# DEFAULT false, deliberately. With this on, any deploy attempted while the
+# fault injection is switched on will roll itself back -- correct behaviour, and
+# baffling if you had forgotten the injection was still active. Turning it on is
+# a demo step you take on purpose, not a surprise you inherit from an apply.
+variable "canary_rollback_on_alarm" {
+  description = "Roll a canary back automatically when a demo app alarm fires."
+  type        = bool
+  default     = false
+}

@@ -1617,6 +1617,109 @@ into a number, and a number is believed in a way a stated uncertainty is not.
 
 ---
 
+## D-056 — Alarms treat missing data as `missing`, never as `notBreaching`
+
+**Decision:** all three demo-app alarms set `treat_missing_data = "missing"`, so
+an idle function sits in `INSUFFICIENT_DATA` rather than `OK`.
+
+**Why:** `notBreaching` is the tempting default — it stops alarms flapping on a
+low-traffic service, which sounds like exactly what a demo app needs. It is also
+D-026 arriving in CloudWatch's own vocabulary.
+
+With no invocations there is no error rate to compute. `notBreaching` would take
+that absence and report **OK** — and the gate, which reads alarm state as
+evidence about target health, would then be told a service nobody has invoked is
+healthy. Same failure as an empty Inspector findings list, same failure as
+`sum(values) or 0` on a CloudWatch query, arriving from a third direction.
+
+`INSUFFICIENT_DATA` is the honest state, and the Phase 2.4 collector already
+distinguishes all three: `OK` means measured and fine, `ALARM` means measured and
+bad, `INSUFFICIENT_DATA` means not measured. That distinction only survives if
+the alarm is configured to preserve it.
+
+**The general shape, now seen four times:** every observability system has a
+default that converts "no data" into "no problem", because that default produces
+quieter dashboards. Quieter is not the same as more accurate, and a gate reading
+those dashboards inherits the lie.
+
+---
+
+## D-057 — Alarm-driven rollback is opt-in, and an unreadable alarm stops the deploy
+
+**Two decisions in one block, because they pull in opposite directions and both
+are deliberate.**
+
+**Rollback is off by default** (`canary_rollback_on_alarm = false`). With it on,
+any deploy started while fault injection is still active rolls itself straight
+back. That is *correct behaviour* and *thoroughly confusing* if you had forgotten
+the injection was on — you would be debugging CodeDeploy while the actual cause
+was a DynamoDB row you set an hour ago. Switching it on is a deliberate demo
+step, not something inherited from an apply.
+
+**But `ignore_poll_alarm_failure = false`,** which is the strict setting: if
+CodeDeploy cannot *read* the alarms, it stops the deployment rather than
+proceeding. An unreadable alarm is not a passing alarm — the same sentence as
+D-026, applied to the deploy path rather than the verdict path.
+
+**Why the asymmetry is right:** the two settings answer different questions.
+Whether the mechanism is armed at all is a *choice*, and choices should be
+explicit. Whether an armed mechanism fails open or closed is a *safety property*,
+and safety properties should not be configurable at all.
+
+`DEPLOYMENT_STOP_ON_ALARM` is listed in `auto_rollback_configuration`
+unconditionally while `alarm_configuration.enabled` is what actually arms it.
+Listing an event CodeDeploy can never raise is harmless; wiring alarms nobody
+asked for is not.
+
+---
+
+## D-058 — Crafted commits are synthetic in content and real in form
+
+**Decision:** `scripts/craft_commit.py` manufactures genuine git commits rather
+than injecting a fabricated change-context payload.
+
+**Why it has to be real git:** change context is the one signal that cannot be
+synthesized by configuration. Health can be manufactured by breaking the app,
+alarms by tightening a threshold — but "a 620-line Friday-night change to
+payments/" only exists as an actual commit. And it needs to be one, because the
+whole chain has to run: `git log` → `build_change_context.py` → base64 →
+`UserParameters` → the SHA cross-check → provenance labelling.
+
+A fabricated payload would prove the gate can read a dictionary. A real commit
+proves it can read a repository. The difference is every parsing and encoding bug
+between the two.
+
+**Backdating goes through git's own `GIT_COMMITTER_DATE`,** not through a
+patched field downstream, so `git log -1 --format=%cI` reports it and
+`is_off_hours` is computed from a genuine timestamp. Every layer sees exactly
+what it would see for a real 8pm Friday commit.
+
+**Three safety rules, and the reasoning behind each:**
+
+| Rule | Why |
+| --- | --- |
+| only writes under `demo/synthetic/` | a blast radius you can state in one sentence is one you can undo in one command |
+| never rewrites history | a script that manufactures commits AND can rebase is one typo from being the worst thing in the repo. Even the teardown is an ordinary commit. |
+| pushing is opt-in | a local commit is undone with `git reset`; a pushed one has started a pipeline |
+| refuses to run on a dirty tree | it commits on your behalf, and sweeping real work into a commit labelled synthetic is not undoable by anything it knows about |
+
+**Paths are `demo/synthetic/payments/` rather than `payments/`,** which costs a
+little realism and buys something worth more: a reviewer looking at the audit
+record can see immediately that the change was manufactured. These records are
+talk material, and a demo indistinguishable from a real incident is a demo that
+can be misrepresented — including by me. The sensitive-path signal still fires,
+because the check is a substring match and `payments/` is present. What is lost
+is only the pretence.
+
+**One detail that matters more here than usual:** `git` is invoked with an
+argument list and `shell=False`. One of the recipes is literally a prompt
+injection payload and others contain quotes and newlines; through a shell those
+become syntax. There is a test asserting the payload arrives as exactly one
+argument — the same lesson as the base64 encoding in Phase 2.2, in a third
+format.
+
+---
+
 ## Open — model selection for the verdict layer
 
 Not yet decided. `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the default

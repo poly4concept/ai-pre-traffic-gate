@@ -73,4 +73,13 @@ artifacts:
   # runtime.
   base-directory: services/demo_app
   files:
-    - handler.py
+    # Every module, not just the entrypoint. This was `handler.py` alone until
+    # Phase 2.5 added faults.py, at which point a deploy would have produced a
+    # Lambda that import-errors on its first invocation -- after CodeDeploy had
+    # already begun shifting traffic to it.
+    #
+    # A glob rather than a list because the failure mode of forgetting to add a
+    # file here is a runtime ImportError in production, which is a bad way to
+    # find out about a packaging decision.
+    - '**/*.py'
+    - '!__pycache__/**'

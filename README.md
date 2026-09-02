@@ -231,7 +231,7 @@ Each phase must work before the next begins.
 | 0 | Groundwork — scaffold, IaC skeleton, budget, Bedrock access | done |
 | 1 | Boring deploy path, zero AI — pipeline, canary, hardcoded halt | done |
 | 2 | Signal collectors — common interface, mocks first, then real | done |
-| 2.5 | Synthesised-real signals — controllable faults, genuine findings | deferred until 3 is verified |
+| 2.5 | Synthesised-real signals — controllable faults, genuine findings | 2.5a/b/d done; 2.5c (Inspector CVEs) deferred |
 | 3 | Verdict layer, shadow mode only | code complete, awaiting a live model call |
 | 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | 4a done (22 labelled, harness + baseline); 4b awaits a live model |
 | 5 | Enforcement + escalation — executor, canary/halt, human override | not started |

@@ -12,14 +12,19 @@ locals {
   demo_app_name = "${var.project_name}-demo-app"
 }
 
-# Zipping the handler from Terraform is fine while the app is a single file
-# with no dependencies. Once CodeBuild exists (increment 3) it produces the
-# artifact instead, and this data source goes away. Noting that now so the
-# swap does not look like an afterthought later.
+# Phase 2.5: source_dir, not source_file.
+#
+# The demo app stopped being one file when fault injection arrived, and a
+# bootstrap zip containing only handler.py would import-error on `from faults
+# import ...` before running a single line. The same change is needed in
+# buildspec.yml, which is the copy that actually matters -- this one is only the
+# payload Terraform uses to create the function before the pipeline has ever
+# run.
 data "archive_file" "demo_app" {
   type        = "zip"
-  source_file = "${path.module}/../../services/demo_app/handler.py"
+  source_dir  = "${path.module}/../../services/demo_app"
   output_path = "${path.module}/build/demo_app.zip"
+  excludes    = ["__pycache__", "**/__pycache__/**", "**/*.pyc"]
 }
 
 # --- Execution role -------------------------------------------------------
@@ -93,6 +98,18 @@ resource "aws_lambda_function" "demo_app" {
 
   environment {
     variables = {
+      # Phase 2.5. Empty would disable fault injection entirely; the app treats
+      # an unset table as "no faults configured" and behaves normally.
+      #
+      # WORTH KNOWING: Lambda snapshots environment variables into a published
+      # version, and the `live` alias serves published versions (D-010). Setting
+      # this here reaches $LATEST only, so a pipeline run is required before the
+      # traffic-serving version can see it. That is the same trap that made an
+      # env-var-based fault switch unworkable in the first place -- see
+      # services/demo_app/faults.py.
+      FAULT_TABLE = aws_dynamodb_table.demo_app_faults.name
+      FAULT_KEY   = "demo-app"
+
       APP_VERSION = var.demo_app_version
       COMMIT_SHA  = var.demo_app_commit_sha
     }

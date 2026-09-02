@@ -32,6 +32,18 @@ _REPO_ROOT = str(SERVICES.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# Phase 2.5. The demo app stopped being a single file when fault injection
+# arrived, so its own modules have to be importable -- both for their tests and
+# because handler.py now does `from faults import ...` at module scope, which
+# `load_handler("demo_app")` would otherwise fail on.
+#
+# Safe alongside decision_service on the path because the only colliding name is
+# `handler`, which nothing imports directly -- `load_handler` loads both by file
+# path under distinct module names precisely to avoid that (F-005).
+_DEMO_APP = str(SERVICES / "demo_app")
+if _DEMO_APP not in sys.path:
+    sys.path.insert(0, _DEMO_APP)
+
 
 @pytest.fixture(autouse=True)
 def _no_real_aws(request, monkeypatch):

@@ -103,13 +103,37 @@ resource "aws_codedeploy_deployment_group" "demo_app" {
     deployment_option = "WITH_TRAFFIC_CONTROL"
   }
 
-  # Rollback on a failed or manually stopped deployment. Alarm-driven rollback
-  # (DEPLOYMENT_STOP_ON_ALARM) needs an alarm_configuration block, and the
-  # alarms it would watch are a Phase 2.5 deliverable -- they have to be tuned
-  # against the demo app's fault injection to trip reliably. Listing the event
-  # without the alarms would be decoration.
+  # Phase 2.5b filled in the gap this comment used to describe. The alarms now
+  # exist and are tuned against the fault injection, so DEPLOYMENT_STOP_ON_ALARM
+  # is a real event rather than decoration.
+  #
+  # The event is listed unconditionally while the alarm_configuration below is
+  # what actually switches the behaviour on. Listing an event CodeDeploy can
+  # never raise is harmless; wiring alarms nobody asked for is not.
   auto_rollback_configuration {
     enabled = true
-    events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_REQUEST"]
+    events = [
+      "DEPLOYMENT_FAILURE",
+      "DEPLOYMENT_STOP_ON_REQUEST",
+      "DEPLOYMENT_STOP_ON_ALARM",
+    ]
+  }
+
+  # The demo's centrepiece: break the canary, and CodeDeploy reverses the
+  # traffic shift on its own while the audience watches.
+  #
+  # `enabled` is a variable defaulting to FALSE. With it on, any deploy started
+  # while fault injection is active rolls itself straight back -- which is
+  # correct, and thoroughly confusing if you had forgotten the injection was
+  # still on. Switching it on is a deliberate demo step.
+  #
+  # `ignore_poll_alarm_failure = false` is the fail-closed choice, and it is the
+  # same argument as everywhere else in this project: if CodeDeploy cannot READ
+  # the alarms, it stops the deployment rather than assuming they are fine. An
+  # unreadable alarm is not a passing alarm.
+  alarm_configuration {
+    enabled                   = var.canary_rollback_on_alarm
+    alarms                    = local.demo_app_alarm_names
+    ignore_poll_alarm_failure = false
   }
 }
