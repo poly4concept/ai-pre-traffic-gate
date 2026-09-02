@@ -56,12 +56,26 @@ python scripts/inject_fault.py errors --rate 0.3 --ms 1500
 Settings live in one DynamoDB row and are read at request time, so they take
 effect within the cache TTL (5s) with no redeploy.
 
-### The trap
+### The trap (F-016 — this one actually happened)
 
-The Lambda's `FAULT_TABLE` setting reaches the alias only through a **published
-version**. If `inject_fault.py status` reports the table but nothing changes in
-behaviour, the alias is serving a version published before the setting existed —
-**run the pipeline once**.
+**`terraform apply` does not deploy the demo app's code.** `demo_app.tf` sets
+`ignore_changes = [filename, source_code_hash]` on purpose, so the PIPELINE owns
+the code and Terraform owns only the configuration.
+
+So an apply delivers `FAULT_TABLE` and the IAM policy while leaving the code
+untouched — a perfectly wired switch connected to nothing. And because the app
+fails safe, the symptom is sixty successful invocations and calm alarms, which
+looks exactly like badly-tuned thresholds.
+
+**After any apply that adds fault injection, run the pipeline once:**
+
+```powershell
+git commit --allow-empty -m "Deploy fault injection" && git push
+```
+
+`drive_traffic.py` now detects this directly — it reports `fault-aware
+responses: NO` when the deployed build predates 2.5a, rather than leaving you to
+infer it from an absence.
 
 ### Teardown
 
@@ -95,25 +109,38 @@ trap in CloudWatch's own vocabulary.
 ### Recipe — make an alarm fire
 
 ```powershell
+# 1. break the app
 python scripts/inject_fault.py errors --rate 0.5
 
-# Drive traffic. Alarms need datapoints -- an idle function stays
-# INSUFFICIENT_DATA forever, which is correct and useless for a demo.
-#
-# NOT curl. The function URL is AWS_IAM authorised, so an unsigned request is
-# rejected at the edge with 403 and the Lambda is never invoked at all -- no
-# Invocations metric, no Errors metric, no alarm, and an hour of confusion.
-# `aws lambda invoke` signs the request for you.
-1..60 | ForEach-Object {
-  aws lambda invoke --function-name ai-pre-traffic-gate-demo-app:live `
-    --cli-binary-format raw-in-base64-out --payload '{}' $env:TEMP\out.json | Out-Null
-  Start-Sleep -Milliseconds 500
-}
+# 2. drive traffic AND watch the alarms, in one command.
+#    Needs invoke permission, so run it as the admin profile.
+$env:AWS_PROFILE = 'poly4'
+python scripts/drive_traffic.py --count 60 --watch
+```
 
-# watch it flip, usually within 2-3 minutes
-aws cloudwatch describe-alarms `
-  --alarm-names ai-pre-traffic-gate-demo-app-error-rate `
-  --query "MetricAlarms[0].{state:StateValue,reason:StateReason}"
+`drive_traffic.py` reports three outcomes separately, and the distinction is the
+point:
+
+| | means |
+| --- | --- |
+| `ok` | the function ran and returned |
+| `faulted` | the function RAISED — what injection should do, and what CloudWatch counts as an Error |
+| `refused` | the invoke call itself failed. **The function never ran**, so no metric was produced and no alarm can fire. |
+
+**Why not a PowerShell loop around `aws lambda invoke`:** the first attempt at
+this test produced zero invocations and an alarm stuck in `INSUFFICIENT_DATA` —
+which reads exactly like a broken alarm and was actually shell quoting. A
+`refused` count of 60 says that immediately; an unchanging alarm does not.
+
+Also note the script measures the error rate **itself**, from the invoke
+responses, rather than waiting on metrics. Metrics lag 1–2 minutes, so "did my
+injection work?" is otherwise unanswerable for exactly as long as it takes to
+start doubting the setup.
+
+Check alarm state any time, with no invocations and no cost:
+
+```powershell
+python scripts/drive_traffic.py --alarms-only
 ```
 
 Then confirm the gate can see it:
@@ -123,6 +150,8 @@ aws lambda invoke --function-name ai-pre-traffic-gate-gate `
   --cli-binary-format raw-in-base64-out --payload '{}' response.json
 Get-Content response.json
 ```
+
+Look for `target_health` carrying a real error rate and `has_active_alarm: true`.
 
 ### Teardown
 

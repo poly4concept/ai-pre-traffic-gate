@@ -852,6 +852,80 @@ are the instrument and live data is the measurement.
 
 ---
 
+## F-016 — Terraform delivered the switch and the pipeline never delivered the wiring
+
+**What happened:** `terraform apply` added the `FAULT_TABLE` environment
+variable and the DynamoDB read policy to the demo app. `inject_fault.py` set
+`error_rate: 0.5` and reported success. Sixty invocations later: **sixty
+successes, zero faults, every alarm calmly `OK`.**
+
+The deployed code contained no fault support at all:
+
+```
+files in the deployed zip: ['handler.py']
+handler imports faults:    False
+handler calls apply_faults: False
+```
+
+**Why:** `demo_app.tf` carries `lifecycle { ignore_changes = [filename,
+source_code_hash] }` — a deliberate choice (D-010) so that the PIPELINE owns
+the demo app's code and Terraform does not fight it.
+
+The consequence nobody had thought through: an apply delivers **configuration**
+faithfully while leaving **code** untouched. So the env var arrived, the IAM
+policy arrived, the switch was set — and the code that would read any of it was
+never deployed. A perfectly wired switch connected to nothing.
+
+### Why it was silent, which is the part worth keeping
+
+The demo app fails **safe** by design: if it cannot read its fault config, it
+serves normally. That was the right call and it is argued for at length in
+`faults.py` — a performer that collapses whenever its script is unreadable can
+never be told apart from one that is genuinely broken.
+
+The cost is that an app with **no fault subsystem whatsoever** behaves
+identically to one that is healthy. `faulted == 0` turned out to have three
+completely different causes and no way to distinguish them:
+
+| observed | actual cause | fix |
+| --- | --- | --- |
+| nothing invoked | shell quoting, or missing IAM | fix the caller |
+| invoked, no `faults` field in the response | **deployed code predates 2.5a** | run the pipeline |
+| invoked, `faults` field present | injection off or set to zero | `inject_fault.py status` |
+
+Two afternoons went into the first and second rows, both of which looked like
+"the alarm thresholds are wrong."
+
+### The fix, and the general lesson
+
+`drive_traffic.py` now reads the response body and reports whether a `faults`
+field was present at all. The demo app was already returning one — that field
+existed to prove to an audience which requests were deliberately degraded, and
+it turns out to double as a capability probe. Three causes, three distinct
+messages, tested.
+
+**The reusable rule:** whenever a component fails safe, something else has to
+be able to observe that it is failing. Fail-safe converts a loud problem into a
+silent one, which is the correct trade for the component and a hole in the
+system unless somebody is watching from outside. "Fail safe" and "fail
+observably" are different properties and you need both.
+
+**And the narrower one, specific to this architecture:** when Terraform and a
+pipeline own different halves of the same resource, `terraform apply` reporting
+success means only that Terraform's half is current. Anything that depends on
+the other half needs a deploy, and the two are easy to confuse because both are
+"I applied my changes."
+
+### Also found along the way
+
+`aws logs filter-log-events --log-group-name "/aws/lambda/..."` fails under Git
+Bash on Windows with a regex validation error, because MSYS rewrites any
+argument starting with `/` into a Windows path — the API receives
+`C:/Program Files/Git/aws/lambda/...`. `MSYS_NO_PATHCONV=1` disables it. Nothing
+to do with AWS, and the error message points squarely at AWS.
+
+---
+
 ## F-014 — Three stacked gates, and an error that was not about the thing being tested
 
 **What happened:** four days of Bedrock being "not working" turned out to be
