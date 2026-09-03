@@ -24,10 +24,12 @@ from evals.harness import (
     OVER_FLAG_KINDS,
     UNDER_FLAG_KINDS,
     Attempt,
+    EvalRun,
     ScenarioResult,
     run_eval,
 )
 from evals.labels import BY_SCENARIO, LABELS, PAIRS, Kind, Label
+from evals.report import format_run
 from evals.stub import AttributeCountingClient
 
 LOW, MEDIUM, HIGH = RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH
@@ -510,3 +512,144 @@ def test_the_absent_signal_scenarios_differ_in_status_not_just_data():
 
     assert chosen.status is not failed.status
     assert chosen.data is None and failed.data is None
+
+
+# --- Measured vs refused --------------------------------------------------
+#
+# Phase 4b, found on the first live run. Four scenarios failed schema
+# validation and fell back to a fail-closed HIGH; three carried labels where
+# `high` was acceptable, so the harness scored them as correct judgements. The
+# gate was credited for an assessment it had explicitly declined to make.
+
+
+def refusal(level=HIGH, *, failure_kind="invalid_verdict:primary_concerns"):
+    """A fail-closed attempt: the gate declined to answer."""
+    return Attempt(
+        scenario="x",
+        risk_level=level,
+        source=VerdictSource.FAIL_CLOSED,
+        reasoning=f"could not obtain a valid verdict from Bedrock ({failure_kind})",
+        concerns=(),
+        attempts=3,
+        failure_kind=failure_kind,
+        input_tokens=None,
+        output_tokens=None,
+        latency_ms=None,
+    )
+
+
+def test_a_refusal_is_not_a_measured_scenario():
+    lab = label(kind=Kind.RISKY, acceptable=frozenset({MEDIUM, HIGH}))
+
+    assert ScenarioResult(label=lab, attempts=(refusal(),)).is_measured is False
+    assert ScenarioResult(label=lab, attempts=(attempt(HIGH),)).is_measured is True
+
+
+def test_one_refusal_among_several_attempts_unmeasures_the_scenario():
+    """Same reasoning as `passed` requiring every attempt to be acceptable: a
+    scenario the gate refused to answer once is not fully measured."""
+    lab = label(kind=Kind.RISKY, acceptable=frozenset({MEDIUM, HIGH}))
+
+    result = ScenarioResult(label=lab, attempts=(attempt(HIGH), refusal(), attempt(HIGH)))
+
+    assert result.is_measured is False
+    assert result.fail_closed_attempts == 1
+
+
+def test_a_refusal_on_a_fail_closed_label_is_still_measured():
+    """There, refusing IS the behaviour under test. Excluding it would remove
+    the only scenario that checks the default branch works."""
+    lab = label(scenario="no_change_context", kind=Kind.FAIL_CLOSED, acceptable=frozenset({HIGH}))
+
+    result = ScenarioResult(label=lab, attempts=(refusal(),))
+
+    assert result.is_measured is True
+    assert result.passed is True
+
+
+def test_a_refusal_does_not_count_as_a_correct_verdict():
+    """THE FLATTERY THIS CLOSES.
+
+    A fail-closed HIGH on a risky label is `high`, which is acceptable, which
+    used to read as a pass. It is not a pass -- nothing was assessed.
+    """
+    lab = label(scenario="risky", kind=Kind.RISKY, acceptable=frozenset({MEDIUM, HIGH}))
+    run = EvalRun(
+        results=(ScenarioResult(label=lab, attempts=(refusal(),)),),
+        repeats=1,
+        model_id="test",
+    )
+
+    assert run.passes == (0, 0), "a refused scenario must not appear in the pass denominator"
+    assert run.unmeasured[0].scenario == "risky"
+
+
+def test_a_refusal_is_excluded_from_the_under_flagging_denominator():
+    """A refusal halts the deploy, so it is not a risky change waved through.
+    Counting it either way would make the judgement rate move with Bedrock's
+    availability rather than with the model's calibration.
+    """
+    risky_ok = label(scenario="a", kind=Kind.RISKY, acceptable=frozenset({MEDIUM, HIGH}))
+    risky_refused = label(scenario="b", kind=Kind.RISKY, acceptable=frozenset({MEDIUM, HIGH}))
+    run = EvalRun(
+        results=(
+            ScenarioResult(label=risky_ok, attempts=(attempt(HIGH),)),
+            ScenarioResult(label=risky_refused, attempts=(refusal(),)),
+        ),
+        repeats=1,
+        model_id="test",
+    )
+
+    assert run.under_flagging == (0, 1)
+    assert len(run.unmeasured) == 1
+
+
+def test_a_refusal_is_excluded_from_over_flagging_too():
+    """Deliberate, and the argument is worth stating because it cuts the other
+    way: a fail-closed HIGH on a benign change really did block a fine deploy,
+    so there is a case for counting it as over-flagging.
+
+    It is excluded because the two rates measure JUDGEMENT, and a gate that
+    halts because Bedrock returned malformed JSON has exercised none. The
+    operational cost of those halts is real and is reported -- by name, in the
+    UNMEASURED block -- just not as a calibration figure.
+    """
+    benign = label(scenario="a", kind=Kind.BENIGN, acceptable=frozenset({LOW}))
+    run = EvalRun(
+        results=(ScenarioResult(label=benign, attempts=(refusal(),)),),
+        repeats=1,
+        model_id="test",
+    )
+
+    assert run.over_flagging == (0, 0)
+    assert run.fail_closed_count == 1
+
+
+def test_a_refusal_is_not_listed_as_a_judgement_failure():
+    benign = label(scenario="a", kind=Kind.BENIGN, acceptable=frozenset({LOW}))
+    run = EvalRun(
+        results=(ScenarioResult(label=benign, attempts=(refusal(),)),),
+        repeats=1,
+        model_id="test",
+    )
+
+    assert run.failures == ()
+    assert len(run.unmeasured) == 1
+
+
+def test_the_report_names_the_refused_scenarios():
+    """A count alone is not enough. Four refusals spread across the benign
+    fixtures and four concentrated on the risky ones are the same number
+    describing opposite situations."""
+    lab = label(scenario="critical_cve_no_patch", kind=Kind.RISKY, acceptable=frozenset({HIGH}))
+    run = EvalRun(
+        results=(ScenarioResult(label=lab, attempts=(refusal(),)),),
+        repeats=1,
+        model_id="test",
+    )
+
+    text = format_run(run)
+
+    assert "UNMEASURED" in text
+    assert "critical_cve_no_patch" in text
+    assert "invalid_verdict:primary_concerns" in text

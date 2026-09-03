@@ -150,6 +150,35 @@ class ScenarioResult:
         return sum(1 for word in wanted if word.lower() in text) / len(wanted)
 
     @property
+    def fail_closed_attempts(self) -> int:
+        return sum(1 for a in self.attempts if a.source is VerdictSource.FAIL_CLOSED)
+
+    @property
+    def is_measured(self) -> bool:
+        """Did the gate actually form an opinion about this scenario?
+
+        THE FLATTERY THIS CLOSES, found on the first live run in Phase 4b.
+
+        Four scenarios failed schema validation and fell back to a fail-closed
+        HIGH. Three of them carried labels where `high` was acceptable, so they
+        were scored as passes -- the gate got credit for judgement it had
+        explicitly declined to exercise. The eval reported 85.7% acceptable
+        while a fifth of its attempts contained no assessment at all.
+
+        A fail-closed verdict is a refusal to answer, and a refusal is neither
+        right nor wrong about risk. Excluding it from the judgement rates is not
+        letting the gate off: the refusals are counted and named separately, and
+        an operator cares about them at least as much. What they are not is
+        evidence about the model's calibration.
+
+        The exception is a scenario whose LABEL is `fail_closed` -- there,
+        refusing is the behaviour under test, so it is measured normally.
+        """
+        if self.label.kind is Kind.FAIL_CLOSED:
+            return True
+        return self.fail_closed_attempts == 0
+
+    @property
     def model_call_violation(self) -> bool:
         """Set when a scenario that must not reach the model did."""
         if not self.label.expect_no_model_call:
@@ -176,8 +205,17 @@ class EvalRun:
     # --- the two numbers that matter -------------------------------------
 
     def _rate(self, kinds: frozenset[Kind], direction: str) -> tuple[int, int]:
-        """(failures, denominator) for one failure direction."""
-        pool = [r for r in self.results if r.label.kind in kinds and r.label.scored]
+        """(failures, denominator) for one failure direction.
+
+        Unmeasured scenarios are excluded from BOTH the numerator and the
+        denominator. See `ScenarioResult.is_measured`: these are attempts where
+        the gate refused to answer, and a refusal is not a calibration error in
+        either direction. Counting them would make the judgement rates move with
+        Bedrock's availability.
+        """
+        pool = [
+            r for r in self.results if r.label.kind in kinds and r.label.scored and r.is_measured
+        ]
         bad = [r for r in pool if r.direction == direction]
         return len(bad), len(pool)
 
@@ -200,17 +238,34 @@ class EvalRun:
 
     @property
     def scored_results(self) -> tuple[ScenarioResult, ...]:
+        """Scenarios with a label worth scoring, whether or not the gate
+        answered. `measured_results` is the subset it actually answered."""
         return tuple(r for r in self.results if r.label.scored)
 
     @property
+    def measured_results(self) -> tuple[ScenarioResult, ...]:
+        return tuple(r for r in self.scored_results if r.is_measured)
+
+    @property
+    def unmeasured(self) -> tuple[ScenarioResult, ...]:
+        """Scored scenarios where the gate refused rather than assessed.
+
+        Reported by name, not just counted: which scenarios went unmeasured
+        decides whether the rest of the numbers mean anything. Four refusals
+        spread across the benign fixtures and four concentrated on the risky
+        ones are the same figure describing opposite situations.
+        """
+        return tuple(r for r in self.scored_results if not r.is_measured)
+
+    @property
     def passes(self) -> tuple[int, int]:
-        scored = self.scored_results
-        return sum(1 for r in scored if r.passed), len(scored)
+        measured = self.measured_results
+        return sum(1 for r in measured if r.passed), len(measured)
 
     @property
     def exact(self) -> tuple[int, int]:
-        scored = [r for r in self.scored_results if r.label.ideal is not None]
-        return sum(1 for r in scored if r.exactly_ideal), len(scored)
+        measured = [r for r in self.measured_results if r.label.ideal is not None]
+        return sum(1 for r in measured if r.exactly_ideal), len(measured)
 
     @property
     def stability(self) -> tuple[int, int]:
@@ -218,7 +273,9 @@ class EvalRun:
 
     @property
     def failures(self) -> tuple[ScenarioResult, ...]:
-        return tuple(r for r in self.scored_results if not r.passed)
+        """Wrong judgements. A refusal is not a wrong judgement -- it appears
+        under `unmeasured` instead, where its cause can be read."""
+        return tuple(r for r in self.measured_results if not r.passed)
 
     @property
     def model_call_violations(self) -> tuple[ScenarioResult, ...]:

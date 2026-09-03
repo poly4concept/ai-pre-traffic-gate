@@ -1170,3 +1170,185 @@ useful — it forced a cleanup that should have happened anyway, and the fact th
 a policy grew 6x during a debugging session without anyone noticing is the
 finding, not the limit.
 
+
+---
+
+## F-017 — The prompt's XML style leaked into a JSON field, and nothing upstream noticed
+
+**Symptom.** First live eval run: 4 of 22 scenarios failed closed, each after
+burning all three attempts on the identical error:
+
+```
+invalid_verdict:primary_concerns — primary_concerns is str, expected an array
+```
+
+**What the model actually sent.** Not garbage. A well-formed list, in the wrong
+format:
+
+```
+'\n  <item>Target service currently in ALARM state with elevated error rate (7.4%)</item>
+  <item>Large refactor (1057 lines) to payment settlement and authentication logic</item>
+  <item>Deployed outside business hours on Friday, reducing support availability</item>\n'
+```
+
+Four correct concerns, in `<item>` tags, inside a single string, in a field
+declared `{"type": "array", "items": {"type": "string"}}`.
+
+**Root cause: ours.** The evidence in the user message is rendered as XML —
+`<change_metrics>`, `<untrusted_text>`, `<target_health>` — chosen deliberately
+in Phase 3.2 so untrusted text could be escaped at a delimiter boundary. The
+tool schema is JSON. We put the model in a document where lists are expressed as
+tags and then declared a field where they are not, and it followed the format it
+could see over the one it had been handed.
+
+The prompt never contains the literal string `<item>`; it renders its own lists
+with dashes. The model invented the tag. It was not copying an example — it was
+matching a register.
+
+**Why nothing caught it.** Bedrock does not validate tool input against the
+declared schema (D-031). The schema is a strongly-worded suggestion; the
+validator is the contract. This is the failure mode that fact predicts, arriving
+exactly as predicted, and it still took a live run to see — because every
+offline test supplies its own tool input and so can only test the validator,
+never the model's willingness to satisfy it.
+
+**Correlated with list length, which is the tell.** Scenarios wanting 0–2
+concerns returned a proper JSON array. Scenarios wanting 3–4 returned tags.
+Below some threshold it is a couple of values; above it, it feels like a list,
+and the model reaches for the list format in scope.
+
+**The fix, both halves cheap.** The schema description now says *"A JSON array
+of plain sentences. No XML tags, no markup, no numbering — the evidence you were
+given is XML, this field is not."* The system prompt says it again in prose
+before the evidence begins. Result: 4 of 22 failing became 0 of 66, and
+fail-closed attempts dropped from 22.7% to 4.5% — all of the remainder being the
+intended `no_change_context` refusal.
+
+**Two lessons, and the second is the one worth the stage:**
+
+1. Anywhere a model is asked to produce structure, say what the structure is
+   *not*, not only what it is — especially when the surrounding context
+   demonstrates a different convention.
+
+2. **A prompt has a house style, and the model will answer in it.** We chose XML
+   for a good reason and did not consider that the choice was also an
+   instruction. Every formatting decision in a prompt is teaching by example,
+   including the ones made for reasons that have nothing to do with the output.
+
+**What it cost while it was invisible:** twelve wasted inferences, and — worse —
+three of the four fail-closed verdicts landed on `high`, which was the
+*acceptable* answer for those labels, so the eval scored them as correct. The
+formatting bug was concealing itself behind the fail-closed design. See F-018.
+
+---
+
+## F-018 — The eval scored the gate's refusals as correct judgement
+
+**Symptom.** The first live run reported **85.7% acceptable** with a warning that
+22.7% of attempts had failed closed. Both numbers were computed correctly. The
+first one was meaningless.
+
+**What was happening.** Four scenarios failed schema validation (F-017) and fell
+back to `Verdict.fail_closed(...)`, which is `high` by construction. Three of
+them carried labels where `high` was an acceptable answer — `critical_cve_no_patch`,
+`untriaged_severity_findings`, `friday_deploy_into_active_alarm`. The harness
+compared the level to the acceptable set, found `high` in it, and recorded a
+pass.
+
+So the gate was credited with three correct risk assessments it had explicitly
+declined to make.
+
+**Why this is worse than a plain arithmetic bug.** It is directionally biased.
+Fail-closed always produces `high`, and `high` is the acceptable answer for
+every *risky* fixture and never for a benign one. So refusals inflate the score
+on precisely the half of the set that measures under-flagging — the number that
+decides whether the gate is worth having. A gate that failed closed on every
+single input would have scored 10/10 on the risky scenarios.
+
+**The fix.** `ScenarioResult.is_measured`: a scored scenario with any
+fail-closed attempt is excluded from both rates, from the pass denominator, and
+from the failures list, and is named in its own `UNMEASURED` block with the
+failure kind. The exception is a scenario whose *label* is `fail_closed`, where
+refusing is the behaviour under test.
+
+**It caught something real within the hour.** A scouting run against Sonnet 5
+failed 66/66 on `AccessDeniedException`. The report named twenty unmeasured
+scenarios and printed `n/a` for over-flagging. Under the old arithmetic it would
+have printed a confident-looking accuracy figure computed entirely from
+refusals — and, given the direction of the bias, a **0% under-flagging rate**
+for a model that had never once been reached.
+
+**The general shape, sixth appearance.** This project's recurring bug is a
+system converting *"no data"* into *"no problem"*: Inspector's empty findings
+list, CloudWatch's `sum(values) or 0`, an omitted prompt section, an alarm's
+`notBreaching`, `drive_traffic.py` reporting a 0% error rate over zero
+invocations (F-016) — and now the eval harness built to measure the first five,
+scoring an absent verdict as a correct one.
+
+Six systems, six vocabularies, one mistake. It is not that the same bug keeps
+being written. It is that *every* layer has a natural place to put an absence,
+and the safe-looking default in each one is the wrong answer. Worth saying
+plainly on stage: I wrote a whole package around this principle, wrote it into
+the system prompt as rule 1, and then broke it in the scoring code.
+
+---
+
+## F-019 — The prompt told the model security findings were not about the new code, and it believed us
+
+**Symptom.** Three scenarios with real CVE findings — `critical_cve_no_patch`,
+`critical_cve_with_patch`, `untriaged_severity_findings` — came back `low`,
+stably, across every repeat. The labels wanted `medium` or `high`. All three of
+the model's under-flags were the security signal.
+
+**First read: the model ignores security.** Wrong, and checking the reasoning
+took thirty seconds:
+
+> "While there is one critical security finding in the currently deployed
+> version (abandoned-lib), this is a pre-existing issue unrelated to the
+> requests library bump, and the change itself does not introduce new
+> vulnerabilities."
+
+It had not ignored the signal. It had read it, reasoned about it, and reached a
+conclusion — the conclusion our own prompt directed. Rule 5 said:
+
+> Security findings may describe the currently deployed version, not the
+> candidate. [...] It is still real context [...] **but it is not vulnerability
+> data about the new code.**
+
+The model did what it was told. **The labels disagreed with the prompt, and the
+model was scored against the labels.**
+
+**Which of the two was wrong.** The prompt, on a point of fact. A vulnerable
+dependency in the deployed version is still in the candidate unless the change
+updates that dependency — the candidate is built from the same repository.
+"Pre-existing" says who introduced the problem; it says nothing about whether
+the artifact about to ship contains it. Our sentence conflated those and taught
+the model to discount a finding it should have carried forward.
+
+Rule 5 now states the fact and stops there — no instruction about what level to
+assign, because writing the expected answer into the prompt would make the eval
+measure obedience instead of judgement.
+
+**It did not fix the number.** Under-flagging stayed at 30% across two rewordings
+(D-063). `critical_cve_with_patch` moved to `medium` on the long version and back
+to `low` on the short one, while `huge_refactor_healthy_target` — which has no
+security findings at all — moved the opposite way each time.
+
+**Three lessons, in ascending order of how much they cost:**
+
+1. **Read the reasoning before diagnosing the verdict.** "The model ignores
+   security" and "the model weighs security differently than I do" look
+   identical in a results table and need completely different fixes.
+
+2. **A prompt is a specification, and specifications contain bugs.** This one
+   asserted something false about how Inspector findings relate to a candidate
+   build. It survived Phase 3 review, offline tests, and my own reading of the
+   file several times, because it reads *sensible* — and it was only exposed by
+   a model following it more literally than I had.
+
+3. **When a model disagrees with a label, one of them is wrong and it is not
+   automatically the model.** The whole point of labelling blind in Phase 4a was
+   to stop me relabelling toward whatever the model said. It works in both
+   directions: it also stops me assuming the label is right. Here the honest
+   finding was a contradiction between two things I had written, which no amount
+   of model-side tuning would have resolved.

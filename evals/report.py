@@ -70,6 +70,22 @@ def format_run(run: EvalRun) -> str:
         w("             A run made largely of fail-closed verdicts measures error")
         w("             handling, not judgement. Treat the rates below with care.")
 
+    # Named, not just counted. WHICH scenarios went unmeasured decides whether
+    # the rest of the report means anything, and these are excluded from the two
+    # rates -- a refusal is not a calibration error in either direction.
+    if run.unmeasured:
+        w(
+            _c(
+                f"  UNMEASURED {len(run.unmeasured)} scored scenario(s): the gate refused "
+                "rather than assessed",
+                "yellow",
+            )
+        )
+        for result in run.unmeasured:
+            attempt = result.attempts[0]
+            w(f"             {result.scenario}  ({attempt.failure_kind})")
+        w("             Excluded from both rates below, and from the denominators.")
+
     stable, total = run.stability
     if stable != total:
         w(
@@ -103,7 +119,7 @@ def format_run(run: EvalRun) -> str:
     w(_rule())
     p_n, p_d = run.passes
     e_n, e_d = run.exact
-    w(f"  acceptable verdict     {_pct(p_n, p_d)}   ({p_n}/{p_d} scored scenarios)")
+    w(f"  acceptable verdict     {_pct(p_n, p_d)}   ({p_n}/{p_d} measured scenarios)")
     w(f"  exactly the ideal      {_pct(e_n, e_d)}   ({e_n}/{e_d})  -- interesting, not a target")
     w(f"  stable across repeats  {_pct(stable, total)}   ({stable}/{total})")
     ins, outs = run.tokens
@@ -128,6 +144,11 @@ def format_run(run: EvalRun) -> str:
         want = "/".join(str(a) for a in sorted(label.acceptable, key=lambda x: RISK_ORDER[x]))
         if not label.scored:
             mark, colour = "~", "dim"
+        elif not result.is_measured:
+            # Neither a pass nor a failure. The level shown is the fail-closed
+            # HIGH, which would otherwise read as a confident assessment and, on
+            # a risky label, as a correct one.
+            mark, colour = "?", "yellow"
         elif result.passed:
             mark, colour = "+", "green"
         else:
@@ -142,7 +163,7 @@ def format_run(run: EvalRun) -> str:
         w("  " + _c(line, colour))
 
     w("")
-    w("  + acceptable   ! failure   ~ contested (recorded, not scored)")
+    w("  + acceptable   ! failure   ? refused (not measured)   ~ contested (not scored)")
     w("  * risk level varied across repeats")
     w("  concerns = share of expected keywords present in the reasoning; reported,")
     w("             never scored, because keyword matching on prose is brittle")

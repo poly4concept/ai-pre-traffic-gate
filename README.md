@@ -233,7 +233,7 @@ Each phase must work before the next begins.
 | 2 | Signal collectors — common interface, mocks first, then real | done |
 | 2.5 | Synthesised-real signals — controllable faults, genuine findings | 2.5a/b/d done; 2.5c (Inspector CVEs) deferred |
 | 3 | Verdict layer, shadow mode only | code complete, awaiting a live model call |
-| 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | 4a done (22 labelled, harness + baseline); 4b awaits a live model |
+| 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | **done.** Haiku 4.5 measured at 81.0% acceptable / 30% under-flagging, losing to the arithmetic baseline (85.7% / 20%). Results and the reasoning in [evals/results/](evals/results/) |
 | 5 | Enforcement + escalation — executor, canary/halt, human override | not started |
 | 6 | Demo and talk assets | not started |
 | 7 | Company environment hardening | not started |

@@ -95,6 +95,15 @@ VERDICT_SCHEMA: dict[str, Any] = {
             "maxItems": MAX_CONCERNS,
             "description": (
                 "The specific things driving the risk level, most important first. "
+                # Phase 4b, measured: on 4 of 22 scenarios the model returned this
+                # field as a SINGLE STRING containing "<item>...</item>" tags. It
+                # had copied the XML style of the evidence in the user message into
+                # a JSON field. Bedrock does not validate tool input against this
+                # schema (D-031), so nothing upstream caught it and all four failed
+                # closed. Saying "plain sentences, no markup" here is the cheap half
+                # of the fix; the system prompt says it again in prose (F-017).
+                "A JSON array of plain sentences. No XML tags, no markup, no "
+                "numbering -- the evidence you were given is XML, this field is not. "
                 "An empty list is correct for a low-risk change."
             ),
         },

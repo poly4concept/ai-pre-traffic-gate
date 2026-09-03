@@ -53,7 +53,7 @@ from typing import Any
 from signals import SignalBundle
 
 from .prompt import PROMPT_VERSION, build_messages, system_blocks
-from .schema import VERDICT_TOOL_NAME, verdict_tool_config
+from .schema import VERDICT_FIELDS, VERDICT_TOOL_NAME, verdict_tool_config
 from .types import Verdict
 from .validation import VerdictValidationError, parse_verdict
 
@@ -336,11 +336,14 @@ class BedrockVerdictClient:
         # overwritten when an attempt actually produces tool arguments, so a
         # later transport failure cannot erase an earlier bad answer.
         last_raw: Any = None
+        # Set after a rejected answer so the next attempt asks a DIFFERENT
+        # question. Without this the retry is a repeat -- see _correction_for.
+        correction: str | None = None
 
         while True:
             attempts += 1
             try:
-                response = self._converse(bundle)
+                response = self._converse(bundle, correction)
                 raw = extract_tool_input(response)
                 last_raw = raw
                 verdict = parse_verdict(raw, model_id=self._model_id)
@@ -361,6 +364,11 @@ class BedrockVerdictClient:
                 out_of_attempts = attempts >= self._max_attempts
                 if not retryable or out_of_time or out_of_attempts:
                     break
+
+                # Only overwritten when there is something to correct, so a
+                # throttle between two format failures does not erase the
+                # instruction the next attempt still needs.
+                correction = _correction_for(last_kind) or correction
 
                 self._sleep(delay)
                 continue
@@ -396,26 +404,108 @@ class BedrockVerdictClient:
             raw_model_output=last_raw,
         )
 
-    def _converse(self, bundle: SignalBundle) -> dict[str, Any]:
+    def _converse(self, bundle: SignalBundle, correction: str | None = None) -> dict[str, Any]:
         return self._client.converse(
             modelId=self._model_id,
             system=system_blocks(),
-            messages=build_messages(bundle),
+            messages=build_messages(bundle, correction),
             toolConfig=verdict_tool_config(),
             inferenceConfig={"temperature": TEMPERATURE, "maxTokens": MAX_TOKENS},
         )
 
 
+# --- What we tell the model when we reject its answer ----------------------
+#
+# Phase 4b, measured: 4 of 22 scenarios failed validation, and each failed on
+# all three attempts with the identical error. At temperature 0 that is what an
+# identical retry buys -- the same answer, twice more, billed each time. The
+# retry only becomes worth making if the second question differs from the first.
+#
+# These are FIXED sentences keyed on the failure, deliberately not the
+# validator's own message. Two validator messages interpolate model-supplied
+# text (an unexpected field name, an out-of-enum risk_level value), and model
+# output derives in part from an untrusted commit message. Echoing it into the
+# next prompt would route attacker-influenced text back through the model for no
+# benefit -- a fixed instruction is both safer and a clearer correction.
+#
+# Note what these do and do not say. They correct FORM, never content: no
+# correction mentions a risk level, a signal, or what the answer should be. A
+# retry that nudged the verdict would be the gate arguing with itself until it
+# got the answer it wanted, which is not a retry at all.
+_GENERIC_CORRECTION = (
+    "Your previous tool call was rejected: its arguments did not match the "
+    "tool's input schema. Call the tool again, with the same assessment, in "
+    "valid form."
+)
+
+_FIELD_CORRECTIONS: dict[str, str] = {
+    "primary_concerns": (
+        "primary_concerns must be a JSON array of plain strings, like "
+        '["first concern", "second concern"]. Not one string containing all of '
+        "them, and no tags, markup or numbering inside the strings."
+    ),
+    "risk_level": (
+        'risk_level must be exactly one of the strings "low", "medium" or '
+        '"high" -- lowercase, no other value, no explanation in the field.'
+    ),
+    "confidence": "confidence must be a JSON number between 0 and 1, such as 0.8.",
+    "reasoning": "reasoning must be a single plain string, with no tags or markup.",
+}
+
+_CORRECTABLE_KINDS = {
+    "no_tool_call": (
+        f"You replied in prose. You must call the {VERDICT_TOOL_NAME} tool "
+        "instead, with your assessment as its arguments."
+    ),
+    "multiple_tool_calls": (
+        f"You called {VERDICT_TOOL_NAME} more than once. Call it exactly once, "
+        "with a single combined assessment."
+    ),
+}
+
+
+def _correction_for(failure_kind: str) -> str | None:
+    """The instruction to add on retry, or None if there is nothing to correct.
+
+    Returns None for transport and throttling failures: a retry after a 429 is
+    already a different request because time has passed, and there is nothing
+    the model did wrong to tell it about.
+    """
+    if failure_kind in _CORRECTABLE_KINDS:
+        return _CORRECTABLE_KINDS[failure_kind]
+
+    if failure_kind.startswith("invalid_verdict:"):
+        field = failure_kind.split(":", 1)[1]
+        # Only OUR field names are trusted here. `field` comes from the
+        # validator, but the unexpected-field case derives it from model output,
+        # so anything unrecognised falls back to the generic sentence rather
+        # than being interpolated into a prompt.
+        if field in VERDICT_FIELDS:
+            return _FIELD_CORRECTIONS.get(field, _GENERIC_CORRECTION)
+        return _GENERIC_CORRECTION
+
+    return None
+
+
 def _classify(exc: Exception) -> tuple[str, str, bool]:
     """Map an exception to (failure_kind, message, retryable).
 
-    Retrying a schema-validation failure IS worth one attempt, which is not
-    obvious. The reasoning: at temperature 0 a model still occasionally emits an
-    out-of-enum value, and if that happens on say 1% of calls then refusing
-    outright halts 1% of deploys for no real reason. One retry takes that to
-    0.01%. The retry is recorded in `attempts`, so Phase 4 can still see the
-    underlying slip rate rather than having it hidden by the repair -- which is
-    the condition that makes the repair honest rather than a cover-up.
+    A schema-validation failure is retryable, but Phase 4b corrected WHY, and
+    the original reasoning here was wrong in an instructive way.
+
+    What this used to say: at temperature 0 a model occasionally slips, so one
+    retry takes a 1% failure rate to 0.01%. That argument assumes the failures
+    are independent. They are not. Measured on 22 scenarios, 4 failed validation
+    and every one of them failed on all three attempts with the byte-identical
+    error -- because at temperature 0 an identical prompt yields an identical
+    answer, so an identical retry is not a second chance, it is the same chance
+    taken again at full price. Twelve inferences, no new information.
+
+    Retries are now worth making because `_correction_for` changes the question:
+    the next attempt is told what was wrong with the last one. The retry is
+    still recorded in `attempts`, so the underlying slip rate stays visible
+    rather than being hidden by the repair -- the condition that makes the repair
+    honest rather than a cover-up.
     """
     if isinstance(exc, VerdictValidationError):
         return f"invalid_verdict:{exc.field or 'unknown'}", str(exc), True

@@ -1729,3 +1729,217 @@ judgment quality.
 The real choice is a Phase 4 output: run the eval fixture set against several
 models and pick on measured over-flagging rate and cost per verdict, not on
 reputation. Record the result here when it exists.
+
+---
+
+## D-059 — Claude Haiku 4.5 is the working verdict model, and it lost to the baseline
+
+**Decision:** Phase 5 proceeds on `us.anthropic.claude-haiku-4-5-20251001-v1:0`.
+No larger model has been measured, and that is a gap rather than a conclusion.
+
+**The measurement, stated before the justification** (22 scenarios, 3 repeats,
+temperature 0, `evals/results/`):
+
+| | baseline | Haiku 4.5 |
+| --- | --- | --- |
+| acceptable verdict | **85.7%** | 81.0% |
+| under-flagging | **20.0%** | 30.0% |
+| over-flagging | 9.1% | 9.1% |
+| stability | 100% | 100% |
+
+Fifteen lines of arithmetic that cannot read beat the model, and beat it on the
+number that decides whether a gate is worth having at all. That is the honest
+headline and it goes on the slide unedited.
+
+**Why it is still the right model to carry into Phase 5**, and this is a
+judgement about what the gate is for rather than an argument with the number:
+
+1. **The baseline cannot generalise off this fixture set.** It scores eight
+   countable attributes. It passes `prompt_injection_in_commit_message` by
+   coincidence — it counts sensitive paths and never reads the message. Change
+   the injection payload to touch no sensitive path and it scores zero while the
+   model still catches it. A benchmark of countable attributes flatters a
+   counter, and 21 scenarios cannot distinguish "better judgement" from "better
+   suited to these 21 scenarios".
+
+2. **The reasoning field is the product, not a by-product.** Every escalation
+   puts that text in front of a human at the moment they have least context. The
+   baseline writes `Attribute score 8. 1057 lines changed; touches a sensitive
+   path`. Haiku writes a paragraph naming which signals moved it and which were
+   missing, and scored 100% concern coverage on
+   `friday_deploy_into_active_alarm` against the baseline's 25%. An audit record
+   nobody can read is a compliance artifact, not a control.
+
+3. **100% stability across three repeats** at temperature 0. This was the risk
+   most likely to sink the whole approach — a gate that answers differently on
+   identical input is not a gate — and it did not materialise.
+
+4. Cost and latency are negligible: ~2,530 input and ~240 output tokens per
+   verdict, one call per pipeline execution.
+
+**What the number actually blocks.** All three of the model's extra under-flags
+are security-signal scenarios, stably. Enforcing mode must not be switched on
+for any service where security findings are a real input until that is either
+fixed by a different model or fenced by a deterministic pre-check ahead of the
+model. Recorded as a Phase 5 precondition, not a caveat.
+
+**Why no larger model was measured, which is the honest gap.** Sonnet 5 returns
+*"not available for this account"* — no subscription. Sonnet 4.5 returns
+`AccessDeniedException` on `aws-marketplace:ViewSubscriptions`, because the
+read-only `ai-agent` identity deliberately lacks marketplace permissions and
+granting them to work around this was explicitly ruled out. Comparing models
+therefore needs an admin profile, and the command is in
+`evals/results/README.md`. Two different errors, two different causes — the
+distinction this project already paid five days to learn (F-014).
+
+---
+
+## D-060 — A retry that repeats the question is not a retry
+
+**Decision:** on a schema-validation or no-tool-call failure, the next attempt
+carries a `<correction>` block telling the model what was wrong with the last
+one. `build_messages(bundle, correction)`.
+
+**What this replaces, and the reasoning it replaces was mine.** The client
+already retried validation failures three times, on an argument written into
+`_classify`: at temperature 0 a model occasionally slips, so one retry takes a
+1% failure rate to 0.01%.
+
+That argument assumes the failures are independent. They are not. Measured on
+the first live run: 4 of 22 scenarios failed validation, and every one failed on
+**all three attempts with the byte-identical error**. At temperature 0 an
+identical prompt yields an identical answer, so an identical retry is not a
+second chance — it is the same chance taken again at full price. Twelve
+inferences, no new information, and a fail-closed verdict at the end that the
+first attempt had already earned.
+
+**The general shape, and it is not specific to models:** a retry is only worth
+making if something about the next attempt differs. For a throttle, time differs
+and a plain retry is correct. For a deterministic rejection, nothing differs
+unless you change the request. Retry logic that does not distinguish those two
+cases is a cost multiplier disguised as resilience.
+
+**Why not simply stop retrying,** which was the cheaper fix: it would have been
+correct and it would have left the 1% case unhandled forever. Feeding the error
+back handles both, costs one inference when it fires, and is the standard shape
+of a structured-output repair loop — worth showing on stage as the thing you
+build once you have measured why the naive version does nothing.
+
+`attempts` is still recorded, so the underlying slip rate stays visible rather
+than being hidden by the repair. That is the condition that makes a repair
+honest rather than a cover-up.
+
+---
+
+## D-061 — Corrections state form, never content, and never quote the model
+
+**Two rules on the correction text, both load-bearing, both tested.**
+
+**1. A correction may not mention risk.** `_FIELD_CORRECTIONS` says
+`primary_concerns must be a JSON array of plain strings`. No correction names a
+risk level, a signal, or a direction. A retry that nudged the verdict would be
+the gate arguing with itself until it got the answer it wanted, which is not a
+retry and not a measurement — it is a way to make any eval say anything. There
+is a test asserting no correction contains a steering word.
+
+**2. A correction is a fixed string, never the validator's message.** This is
+the less obvious one. Two validator messages interpolate model-supplied text:
+the unexpected-field case builds its message from `extra[0]`, a field name the
+model chose, and the enum case quotes the bad `risk_level` value. Model output
+derives in part from the untrusted commit message, so echoing a validator
+message into the next prompt opens a path — narrow, contrived, and real — for
+attacker-influenced text to re-enter as something the model reads twice.
+
+So `_correction_for` maps a failure *kind* to a sentence we wrote, and
+interpolates a field name only after checking it against `VERDICT_FIELDS`.
+Anything unrecognised gets the generic sentence.
+
+**Fourth time in this project.** Untrusted text crossing a format boundary:
+JSON in `UserParameters` (Phase 2.2), XML in the prompt (Phase 3.2), a shell
+argument list in `craft_commit.py` (D-058), and now the model's own output on
+its way back into a prompt. The lesson has stopped being about any one format:
+**every boundary that text crosses is a boundary, including the ones where both
+sides are yours.**
+
+---
+
+## D-062 — A fail-closed verdict is not scored as judgement
+
+**Decision:** a scored scenario with any fail-closed attempt is `unmeasured`. It
+is excluded from both rates, from the pass denominator, and from the failure
+list, and reported by name in its own block.
+
+**The flattery this closes, found on the first live run.** Four scenarios failed
+schema validation and fell back to a fail-closed `high`. Three carried labels
+where `high` was acceptable — so the harness scored them as **correct
+judgements**. The report read 85.7% acceptable while a fifth of its attempts
+contained no assessment at all, and the three "passes" were the gate declining
+to answer a question it happened to be safe to decline.
+
+A fail-closed verdict is a refusal. A refusal is neither right nor wrong about
+risk, and the fact that a refusal is *safe* is exactly what makes it dangerous
+to a benchmark: it lands on `high`, and `high` is the acceptable answer for
+every risky fixture. A gate that failed closed 100% of the time would have
+scored well on the risky half of the set.
+
+**Why excluded from over-flagging too,** since the argument cuts the other way
+there: a fail-closed `high` on a benign change really did block a fine deploy,
+so there is a case for counting it. It is excluded because the two rates measure
+*calibration*, and a gate that halts because Bedrock returned malformed JSON has
+exercised none — counting it would make the over-flagging rate move with
+Bedrock's availability. The operational cost of those halts is real and is
+reported, by name, next to the rates; it is just not a calibration figure.
+
+**It paid for itself the same afternoon.** The Sonnet 5 run failed 66/66 on
+`AccessDeniedException`. The report named twenty unmeasured scenarios and put
+`n/a` where the over-flagging rate goes. Before this change it would have
+printed a plausible accuracy figure derived entirely from refusals — the exact
+shape of the absent-vs-zero bug (D-026), arriving for the sixth time, in the
+harness built to measure the first five.
+
+---
+
+## D-063 — Three prompt-edit cycles on 21 scenarios, then stop
+
+**Decision:** Phase 4b stopped after three prompt versions, with the security
+under-flagging unresolved, and did not keep editing until the number improved.
+
+**What the three cycles showed:**
+
+| scenario | .1 | .2 | .3 |
+| --- | --- | --- | --- |
+| `critical_cve_with_patch` | low | **medium** | low |
+| `huge_refactor_healthy_target` | medium | **low** | medium |
+| under-flagging | 30% | 30% | 30% |
+
+Identical headline rates, different scenarios failing each time. Editing the
+**security** paragraph moved the verdict on a scenario with no security
+findings, and the wording that fixed one broke the other.
+
+**Two conclusions, both worth more than a better number:**
+
+1. **A prompt is not modular.** There is no such thing as editing only the part
+   about security. This is not surprising once said out loud — it is one
+   document read in one pass — but it reads like documentation, and
+   documentation lets you change a section. Prompt versioning
+   (`PROMPT_VERSION`) is what makes it recoverable; without it, `pass3` and
+   `pass4` would be indistinguishable rows in the same table.
+
+2. **21 scenarios cannot resolve a 5% difference.** One scenario is 4.8% of the
+   set. Two more edit-and-remeasure cycles and the prompt would be fitted to
+   these fixtures rather than to the problem, and the resulting number would
+   look better and mean less. The fixture set has a resolution, and pretending
+   otherwise is how a benchmark becomes decoration.
+
+**What shipped and why.** Version `.3` — the tightened security correction. Same
+measured outcome as `.1`, and the prompt no longer tells the model something
+factually false (F-019). Correctness of the prompt's factual claims is not
+something to trade for scoreboard parity, and here nothing was traded.
+
+**What this defers to Phase 4c:** growing the fixture set before any further
+prompt work, so the next edit is measured against something that can see it.
+Specifically the scenarios that would disambiguate the security disagreement — a
+CVE *introduced by the candidate* versus one it merely inherits — which the
+current set never separates. Note the ordering: new fixtures first, then edits.
+Labelling a fixture after seeing what the model said about its neighbours is
+already contaminated enough.
