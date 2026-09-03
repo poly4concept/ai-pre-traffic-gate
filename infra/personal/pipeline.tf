@@ -317,6 +317,43 @@ data "aws_iam_policy_document" "executor" {
   # The alias move is performed by CodeDeploy's own service role, not this one.
   # The executor asks for a deployment; CodeDeploy carries it out. Even the
   # thing holding deploy permissions does not itself hold lambda:UpdateAlias.
+
+  # Phase 5.1. READ ONLY, and that is the security property of the phase.
+  #
+  # The gate can write verdicts and cannot deploy. The executor can deploy and
+  # cannot write verdicts. Neither can do the other's job, so no single
+  # compromised function can both invent a verdict and act on it -- which is the
+  # only reason a model-authored risk level is safe to act on at all.
+  #
+  # Absent on purpose: PutItem, UpdateItem, DeleteItem, and BatchWriteItem. If
+  # the executor could write here it could manufacture a `low` verdict for
+  # itself, and CLAUDE.md constraint 1 would be a comment rather than a control.
+  statement {
+    sid       = "ReadVerdicts"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.verdicts.arn]
+  }
+
+  # Query is granted on the INDEX ARN only, not the table. Scoping it this way
+  # means the executor can look a verdict up by pipeline execution and cannot
+  # enumerate the audit trail by service.
+  statement {
+    sid       = "FindVerdictForThisExecution"
+    actions   = ["dynamodb:Query"]
+    resources = ["${aws_dynamodb_table.verdicts.arn}/index/by_pipeline_execution"]
+  }
+
+  # `low` risk deploys with AWS's managed all-at-once config, which CreateDeployment
+  # validates the same way it validates the custom canary one -- a separate ARN,
+  # and an AccessDenied that names `deploymentconfig` if it is missing. Same
+  # lesson as F-007, one resource type along.
+  statement {
+    sid     = "ReadManagedDeploymentConfig"
+    actions = ["codedeploy:GetDeploymentConfig"]
+    resources = [
+      "arn:aws:codedeploy:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:deploymentconfig:CodeDeployDefault.LambdaAllAtOnce",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "executor" {
@@ -356,6 +393,21 @@ resource "aws_lambda_function" "executor" {
       TARGET_ALIAS     = aws_lambda_alias.live.name
       CODEDEPLOY_APP   = aws_codedeploy_app.demo_app.name
       CODEDEPLOY_GROUP = aws_codedeploy_deployment_group.demo_app.deployment_group_name
+
+      # Phase 5.1 -- where to find the verdict, and whether to obey it.
+      VERDICT_TABLE = aws_dynamodb_table.verdicts.name
+      CANARY_CONFIG = aws_codedeploy_deployment_config.canary.deployment_config_name
+
+      # Defaults to false. With it off the executor reads the verdict, logs the
+      # deployment config it WOULD have chosen, and then deploys exactly as it
+      # did before Phase 5 -- so this can be applied and left running against
+      # real pipeline traffic at zero risk while the log lines are checked.
+      #
+      # Separate from the gate's own switch on purpose (D-064): one controls
+      # whether a verdict can halt a pipeline, the other whether it can choose
+      # a traffic percentage. Arming both at once leaves a bad run with two
+      # candidate causes.
+      EXECUTOR_ENFORCES_VERDICT = tostring(var.executor_enforces_verdict)
     }
   }
 

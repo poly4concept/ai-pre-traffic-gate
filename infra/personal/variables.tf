@@ -284,3 +284,21 @@ variable "canary_rollback_on_alarm" {
   type        = bool
   default     = false
 }
+
+# Phase 5.1. Off by default, and deliberately a separate switch from the gate's
+# own MODEL_VERDICT_CAN_ACT.
+#
+# false -> the executor reads the verdict and LOGS which deployment config it
+#          would have chosen, then deploys as it did before Phase 5. Safe to
+#          apply and leave running against real pipeline traffic.
+# true  -> the risk level picks the deployment config, and a verdict that cannot
+#          be read stops the deploy.
+#
+# Whether the mechanism is armed is a CHOICE and choices should be explicit;
+# whether an armed mechanism fails open or closed is a SAFETY PROPERTY and is
+# not configurable at all. Same split as D-057.
+variable "executor_enforces_verdict" {
+  description = "Let the recorded risk level choose the deployment config, and stop the deploy when no verdict can be read."
+  type        = bool
+  default     = false
+}

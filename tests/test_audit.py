@@ -377,3 +377,49 @@ def test_oversized_fields_are_clipped_so_a_hostile_commit_cannot_break_the_write
 
     assert len(item["raw_model_output"]) <= MAX_FIELD_CHARS + 64
     assert "clipped" in item["raw_model_output"]
+
+
+# --- The sparse index key -------------------------------------------------
+#
+# Phase 5.1 made `pipeline_execution_id` the hash key of a GSI so the executor
+# can find the verdict for the deploy it is about to perform. DynamoDB allows
+# empty strings in ordinary attributes and REJECTS them in key attributes, so
+# the previous `or ""` would have failed the whole PutItem for any invocation
+# without a CodePipeline job.
+
+
+@pytest.mark.parametrize("absent", [None, ""])
+def test_a_missing_pipeline_execution_id_is_omitted_not_written_as_empty(absent):
+    """An empty string in a GSI key attribute fails the entire write.
+
+    Not the field -- the record. So this guards against "the gate silently
+    stopped producing an audit trail for manual invokes", which is invisible
+    and happens to cover exactly the invocation used to test the gate by hand.
+
+    Both `None` and `""` reach this code by different routes and must behave
+    identically.
+    """
+    item = record(pipeline_execution_id=absent)
+
+    assert "pipeline_execution_id" not in item
+
+
+def test_a_real_pipeline_execution_id_is_recorded_at_the_top_level():
+    """Top level, not nested inside `signals` -- a GSI can only key on a
+    top-level attribute, so where this lives is part of the contract."""
+    item = record(pipeline_execution_id="exec-abc")
+
+    assert item["pipeline_execution_id"] == "exec-abc"
+
+
+def test_the_executors_join_key_is_not_the_verdict_id():
+    """The two identifiers are easy to confuse and name almost the same thing.
+
+    `verdict_id` is the GATE's CodePipeline job ID. Every pipeline ACTION gets
+    its own job ID, so the executor's is a different string for the same
+    deploy. If these were ever made equal, the executor's lookup would find
+    nothing on every run.
+    """
+    item = record(verdict_id="job-gate-1", pipeline_execution_id="exec-abc")
+
+    assert item["verdict_id"] != item["pipeline_execution_id"]

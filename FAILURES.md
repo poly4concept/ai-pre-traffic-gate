@@ -1352,3 +1352,48 @@ security findings at all — moved the opposite way each time.
    directions: it also stops me assuming the label is right. Here the honest
    finding was a contradiction between two things I had written, which no amount
    of model-side tuning would have resolved.
+
+---
+
+## F-020 — An empty string is a valid attribute and an invalid key
+
+**Caught before it shipped, by adding the index and then re-reading the writer
+rather than trusting it.**
+
+Phase 5.1 makes `pipeline_execution_id` the hash key of a new GSI. The gate had
+been writing that field like this since Phase 3.4:
+
+```python
+"pipeline_execution_id": pipeline_execution_id or "",
+```
+
+Harmless for two phases. DynamoDB has allowed empty strings in ordinary
+attributes since 2020, so `""` stored fine and nothing complained.
+
+It is **not** allowed in a key attribute, and index keys are key attributes. So
+the moment that GSI existed, any invocation without a CodePipeline job — every
+manual `aws lambda invoke` used to test the gate by hand — would have had its
+`PutItem` rejected outright.
+
+**Not the field. The whole record.** The gate would have silently stopped
+producing an audit trail for exactly the invocations used to check that it
+produces one. And because `record()` already swallows write failures by design
+(a storage failure must not halt a judged deploy), the symptom would have been
+a log line, a green pipeline, and an empty table.
+
+**The fix** is one line and a better answer anyway: omit the attribute rather
+than writing `""`. An item with no `pipeline_execution_id` is simply absent from
+the index, which is the correct answer to "which deploy did this verdict gate?"
+when there was no deploy. A sparse index is a feature here, not a compromise.
+
+**The lesson, and it generalises past DynamoDB:** `"" or None` felt like a
+tidying decision — a defaulted string is easier to read than an optional one.
+It quietly became a schema decision the day something keyed on it. Fields that
+are "just data" become constrained the moment anything indexes, joins, or
+partitions on them, and the code that writes them is usually written long
+before the code that constrains them.
+
+Worth noting how it was found: not by a test, and not by `terraform validate`.
+By writing the index, then going back to check what actually gets written into
+the column it keys on. The test asserting it now exists because of that read,
+not the other way round.

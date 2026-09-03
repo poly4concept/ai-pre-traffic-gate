@@ -49,6 +49,14 @@ resource "aws_dynamodb_table" "verdicts" {
     type = "S"
   }
 
+  # Only attributes used as a key anywhere need declaring. DynamoDB is
+  # schemaless for everything else, which is why the ~40 other fields in a
+  # verdict record appear nowhere in this file.
+  attribute {
+    name = "pipeline_execution_id"
+    type = "S"
+  }
+
   # "Every verdict for this service, newest first" is the query the demo and the
   # Phase 8 analysis both need, and it is not answerable from the primary key --
   # verdict_id is a pipeline job ID, which has no ordering.
@@ -65,6 +73,35 @@ resource "aws_dynamodb_table" "verdicts" {
   global_secondary_index {
     name            = "by_service_recorded_at"
     hash_key        = "service_name"
+    range_key       = "recorded_at"
+    projection_type = "KEYS_ONLY"
+  }
+
+  # Phase 5.1. "Which verdict applies to the deploy I am about to perform?" --
+  # the executor's only question, and the primary key cannot answer it.
+  #
+  # `verdict_id` is the GATE's CodePipeline job ID. Each pipeline ACTION gets
+  # its own job ID, so the executor's is a different string for the same deploy
+  # and it has no way to derive the gate's. The pipeline EXECUTION id is the one
+  # identifier both actions genuinely share.
+  #
+  # Range key `recorded_at` so the query can take the newest: re-running the
+  # Gate action inside one execution writes a second record, and the later one
+  # is the current answer. Without it, "which of the two" would be arbitrary.
+  #
+  # Not made the table's primary key instead, which was the tempting
+  # alternative -- it would give the executor a strongly consistent GetItem and
+  # remove this index entirely. Rejected because it collapses retries: a second
+  # gate attempt would be refused by the conditional write, and the audit trail
+  # would silently keep the FIRST attempt's verdict. This table's purpose is
+  # evidence, and losing a record to save an index is the wrong trade.
+  #
+  # Cost: KEYS_ONLY over ~200 records is a rounding error on a table already
+  # costing about a cent a month, and on-demand means an unused index bills
+  # nothing but its storage.
+  global_secondary_index {
+    name            = "by_pipeline_execution"
+    hash_key        = "pipeline_execution_id"
     range_key       = "recorded_at"
     projection_type = "KEYS_ONLY"
   }

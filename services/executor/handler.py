@@ -50,6 +50,7 @@ import io
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import boto3
@@ -63,9 +64,66 @@ TARGET_ALIAS = os.environ.get("TARGET_ALIAS", "live")
 CODEDEPLOY_APP = os.environ.get("CODEDEPLOY_APP", "")
 CODEDEPLOY_GROUP = os.environ.get("CODEDEPLOY_GROUP", "")
 
+# Phase 5.1 -- the verdict finally reaches the thing that deploys.
+VERDICT_TABLE = os.environ.get("VERDICT_TABLE", "")
+VERDICT_INDEX = os.environ.get("VERDICT_INDEX", "by_pipeline_execution")
+
+# The executor's equivalent of the gate's MODEL_VERDICT_CAN_ACT, and armed the
+# same way: separately, deliberately, and off by default.
+#
+# False -> read the verdict, log which deployment config it WOULD have chosen,
+#          then deploy exactly as before. Shadow mode for the executor.
+# True  -> the risk level selects the deployment config, and an unreadable
+#          verdict stops the deploy.
+#
+# Two switches rather than one because they fail in different directions and
+# arming them together would confuse which one broke. The gate's switch controls
+# whether a model verdict can HALT a pipeline. This one controls whether it can
+# choose HOW MUCH TRAFFIC a new version gets. A bug in the first stops deploys
+# that should have shipped; a bug in the second ships a change faster than it
+# should have. Flipping both at once means a bad pipeline run has two candidate
+# causes and no way to separate them.
+EXECUTOR_ENFORCES_VERDICT = os.environ.get("EXECUTOR_ENFORCES_VERDICT", "").strip().lower() in {
+    "true",
+    "1",
+    "yes",
+}
+
 # CodeDeploy deployment states that mean "stop asking".
 SUCCESS_STATES = frozenset({"Succeeded"})
 FAILURE_STATES = frozenset({"Failed", "Stopped"})
+
+# The whole point of the phase, in one mapping.
+#
+# `low` gets AWS's built-in all-at-once config rather than a custom one: a full
+# deploy has no parameters to get wrong, and using the managed config means
+# there is no second custom config to keep in step with the first.
+#
+# `high` is deliberately absent, and absent rather than mapped to a "safest"
+# config. There is no traffic percentage that makes a high-risk change safe to
+# ship unattended, so the only correct response is not to ship it. See
+# `deployment_config_for`.
+DEPLOYMENT_CONFIG_FOR_RISK = {
+    "low": "CodeDeployDefault.LambdaAllAtOnce",
+    "medium": os.environ.get("CANARY_CONFIG", ""),
+}
+
+# A GSI read is ALWAYS eventually consistent -- DynamoDB offers no strongly
+# consistent read on a global secondary index, so this is a property of the
+# lookup and not a setting we declined to switch on.
+#
+# In practice the gap is comfortable: the gate writes the verdict, reports its
+# job result, and CodePipeline then transitions to the Deploy stage, which is
+# seconds at minimum. But "comfortable in practice" is how you get a failure
+# that only appears under load, and the failure here would halt a legitimate
+# deploy. So the query is retried briefly before the executor concludes there is
+# no verdict.
+#
+# Note the direction: this retry exists to avoid a FALSE HALT. Not finding a
+# verdict still stops the deploy -- the retry only makes sure that when we say
+# there is no verdict, there really is not one.
+VERDICT_LOOKUP_ATTEMPTS = 3
+VERDICT_LOOKUP_DELAY_SECONDS = 1.0
 
 # PutJobFailureResult truncates at 265 characters. Truncating deliberately beats
 # having the API reject the call and leaving the pipeline job hanging until it
@@ -106,6 +164,174 @@ def build_appspec(function: str, alias: str, current: str, target: str) -> str:
     )
 
 
+class VerdictUnavailable(Exception):
+    """No usable verdict for this pipeline execution.
+
+    Its own type so the caller cannot mistake it for a transport error and
+    retry it into a deploy. Raised for every distinct reason -- no execution ID,
+    no record, an unreadable record, an unknown risk level -- because they all
+    have the same correct response and enumerating them at the call site would
+    invite someone to make one of them an exception.
+    """
+
+
+def pipeline_execution_id(job: dict[str, Any]) -> str | None:
+    """The one identifier the gate and the executor genuinely share.
+
+    Not the job ID: each pipeline ACTION gets its own, so the gate's job ID and
+    the executor's are different strings for the same deploy. The execution ID
+    is the same for every action in one run through the pipeline, which is
+    exactly the join key needed here.
+    """
+    context = job.get("data", {}).get("pipelineContext", {})
+    execution = context.get("pipelineExecutionId")
+    return execution if isinstance(execution, str) and execution else None
+
+
+def find_verdict(execution_id: str, *, sleep=time.sleep) -> dict[str, Any]:
+    """The verdict the gate recorded for this pipeline execution.
+
+    Two calls, on purpose. The index is KEYS_ONLY, so the query answers "which
+    record" and the GetItem fetches it. That costs one extra read unit -- about
+    a ten-millionth of a dollar -- and buys two things worth more: the executor
+    reads the FULL record including any human override, and the GetItem is a
+    strongly consistent read of the base table, so the only eventually
+    consistent step is deciding which key to fetch.
+
+    Newest first, because a re-run of the Gate action within one execution
+    writes a second record and the later one is the current answer.
+    """
+    if not VERDICT_TABLE:
+        # Checked here rather than left to boto3, which raises
+        # ParamValidationError for an empty TableName -- and that is NOT a
+        # ClientError, so it would sail past the handler below and fail the
+        # deploy even in shadow mode. An unconfigured executor must be as
+        # harmless in shadow as a misconfigured one.
+        raise VerdictUnavailable("VERDICT_TABLE is not configured")
+
+    dynamodb = boto3.client("dynamodb")
+
+    key = None
+    for attempt in range(1, VERDICT_LOOKUP_ATTEMPTS + 1):
+        page = dynamodb.query(
+            TableName=VERDICT_TABLE,
+            IndexName=VERDICT_INDEX,
+            KeyConditionExpression="pipeline_execution_id = :execution",
+            ExpressionAttributeValues={":execution": {"S": execution_id}},
+            ScanIndexForward=False,
+            Limit=1,
+        )
+        items = page.get("Items") or []
+        if items:
+            key = {"verdict_id": items[0]["verdict_id"]}
+            break
+        if attempt < VERDICT_LOOKUP_ATTEMPTS:
+            logger.info(
+                "no verdict for execution %s yet (attempt %d/%d); the index is "
+                "eventually consistent, retrying",
+                execution_id,
+                attempt,
+                VERDICT_LOOKUP_ATTEMPTS,
+            )
+            sleep(VERDICT_LOOKUP_DELAY_SECONDS)
+
+    if key is None:
+        raise VerdictUnavailable(
+            f"no verdict recorded for pipeline execution {execution_id}. The gate "
+            "either did not run or could not write its record."
+        )
+
+    record = dynamodb.get_item(TableName=VERDICT_TABLE, Key=key, ConsistentRead=True).get("Item")
+    if not record:
+        # The index named a record the table does not have. Should not happen;
+        # worth its own message if it ever does, because the alternative is
+        # debugging a "no verdict" that is really an index inconsistency.
+        raise VerdictUnavailable(
+            f"index named verdict {key['verdict_id'].get('S')} but the table has no such record"
+        )
+    return record
+
+
+def read_risk_level(record: dict[str, Any]) -> str:
+    """Pull the risk level out of a raw DynamoDB item.
+
+    Raw item shape rather than a deserialiser: this is the only field the
+    executor reads, and pulling one string out of `{"S": "medium"}` does not
+    justify bundling boto3.dynamodb.types into a Lambda that currently has no
+    dependency on it.
+    """
+    verdict = record.get("verdict", {}).get("M", {})
+    level = verdict.get("risk_level", {}).get("S", "")
+    if not level:
+        raise VerdictUnavailable("verdict record carries no risk_level")
+    return level.strip().lower()
+
+
+def deployment_config_for(risk_level: str) -> str:
+    """Which CodeDeploy config a risk level selects.
+
+    Raises rather than defaulting, for both unknown values and `high`.
+
+    A default here would be the single most dangerous line in the executor. Give
+    this function a `risk_level` it does not recognise -- a typo, a new level
+    added to the enum and not to this map, a corrupted record -- and a default
+    of "canary" would quietly ship it. The gate's `action_for` raises for the
+    same reason (D-032): a mapping that always answers is a mapping that answers
+    wrongly when it does not know.
+    """
+    config = DEPLOYMENT_CONFIG_FOR_RISK.get(risk_level)
+    if config:
+        return config
+    if risk_level == "high":
+        raise VerdictUnavailable(
+            "verdict is HIGH risk. There is no traffic percentage that makes a "
+            "high-risk change safe to ship without a human, so this deploy stops here."
+        )
+    raise VerdictUnavailable(f"risk level {risk_level!r} has no deployment config")
+
+
+def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
+    """(config to use, human-readable note). Never raises.
+
+    Returns `None` for the config when the caller should use the deployment
+    group's own default -- which is what happens in shadow, and only in shadow.
+
+    THE ASYMMETRY THAT MAKES THIS SAFE TO SWITCH ON: when the executor is not
+    enforcing, every failure to read a verdict is logged and ignored. When it
+    is, every one of them stops the deploy. So the shadow period is not a
+    rehearsal that proves nothing -- the log line it emits is exactly the
+    decision the enforcing version would have made, and if that line says
+    "would have STOPPED" on runs that ought to have shipped, the switch is not
+    ready to flip.
+    """
+    try:
+        execution_id = pipeline_execution_id(job)
+        if not execution_id:
+            raise VerdictUnavailable("job carries no pipelineExecutionId")
+        record = find_verdict(execution_id)
+        risk_level = read_risk_level(record)
+        config = deployment_config_for(risk_level)
+    except VerdictUnavailable as exc:
+        if EXECUTOR_ENFORCES_VERDICT:
+            raise
+        logger.warning("VERDICT SHADOW: would have STOPPED this deploy -- %s", exc)
+        return None, f"shadow: would have stopped ({exc})"
+    except ClientError as exc:
+        # A DynamoDB failure is not a verdict. Same rule, same direction.
+        code = exc.response["Error"]["Code"]
+        if EXECUTOR_ENFORCES_VERDICT:
+            raise VerdictUnavailable(f"could not read the verdict store ({code})") from exc
+        logger.warning("VERDICT SHADOW: would have STOPPED this deploy -- %s", code)
+        return None, f"shadow: would have stopped (verdict store {code})"
+
+    if EXECUTOR_ENFORCES_VERDICT:
+        logger.info("Verdict is %s; deploying with %s", risk_level, config)
+        return config, f"{risk_level} risk -> {config}"
+
+    logger.info("VERDICT SHADOW: verdict is %s; would have used %s", risk_level, config)
+    return None, f"shadow: {risk_level} risk would have used {config}"
+
+
 def fetch_artifact(data: dict[str, Any]) -> bytes:
     """Download the build artifact using CodePipeline's per-job credentials.
 
@@ -134,8 +360,17 @@ def fetch_artifact(data: dict[str, Any]) -> bytes:
     return buf.getvalue()
 
 
-def start_deployment(job_id: str, data: dict[str, Any]) -> None:
+def start_deployment(job_id: str, job: dict[str, Any]) -> None:
     """Publish the built code as a new version and begin shifting traffic."""
+    # FIRST. Before the clients, before the artifact download, and well before
+    # publishing a version -- because a verdict that stops the deploy should
+    # stop it without having minted a Lambda version nothing will ever point
+    # at. Ordering is the whole difference between refusing to deploy and
+    # half-deploying, and it is asserted by a test rather than left to whoever
+    # edits this function next.
+    deployment_config, verdict_note = resolve_deployment_config(job)
+
+    data = job.get("data", {})
     lam = boto3.client("lambda")
     codedeploy = boto3.client("codedeploy")
 
@@ -166,17 +401,24 @@ def start_deployment(job_id: str, data: dict[str, Any]) -> None:
         _succeed(job_id, note=f"no code change; alias remains at v{target}")
         return
 
-    resp = codedeploy.create_deployment(
-        applicationName=CODEDEPLOY_APP,
-        deploymentGroupName=CODEDEPLOY_GROUP,
-        revision={
+    request: dict[str, Any] = {
+        "applicationName": CODEDEPLOY_APP,
+        "deploymentGroupName": CODEDEPLOY_GROUP,
+        "revision": {
             "revisionType": "AppSpecContent",
             "appSpecContent": {
                 "content": build_appspec(TARGET_FUNCTION, TARGET_ALIAS, current, target)
             },
         },
-        description=f"Pipeline deploy {TARGET_ALIAS}: v{current} -> v{target}",
-    )
+        "description": f"Pipeline deploy {TARGET_ALIAS}: v{current} -> v{target} ({verdict_note})",
+    }
+    # Omitted rather than passed as None when not enforcing: leaving the key out
+    # lets the deployment group's own config apply, which is the pre-Phase-5
+    # behaviour and the thing shadow mode must not alter.
+    if deployment_config:
+        request["deploymentConfigName"] = deployment_config
+
+    resp = codedeploy.create_deployment(**request)
     deployment_id = resp["deploymentId"]
     logger.info("Created deployment %s", deployment_id)
 
@@ -261,7 +503,16 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if token:
             check_deployment(job_id, token)
         else:
-            start_deployment(job_id, data)
+            start_deployment(job_id, job)
+
+    except VerdictUnavailable as exc:
+        # Its own branch above ClientError, and the message is written for the
+        # person reading a red pipeline stage rather than for a log parser.
+        # "Deploy blocked: verdict is HIGH risk" is a different morning from
+        # "AccessDeniedException".
+        logger.warning("Deploy blocked by the verdict: %s", exc)
+        _fail(job_id, f"Deploy blocked: {exc}")
+        return {"status": "blocked", "reason": "verdict"}
 
     except ClientError as exc:
         code = exc.response["Error"]["Code"]

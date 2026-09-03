@@ -123,7 +123,7 @@ def build_record(
     change = bundle.change.data
     stamped = (now or datetime.now(UTC)).isoformat()
 
-    return {
+    item = {
         # Partition key. One item per pipeline job, which is the granularity a
         # verdict is actually made at.
         "verdict_id": verdict_id,
@@ -132,7 +132,6 @@ def build_record(
         # volume and be the wrong thing to teach.
         "service_name": bundle.target.service_name,
         "recorded_at": stamped,
-        "pipeline_execution_id": pipeline_execution_id or "",
         "commit_sha": change.commit_sha if change else "",
         # --- the decision ------------------------------------------------
         "mode": mode,
@@ -158,6 +157,26 @@ def build_record(
         # unlike the system prompt, which `prompt_version` locates in git.
         "prompt": _clip(render_bundle(bundle)),
     }
+
+    # OMITTED, not written as "", when there is no pipeline execution -- and the
+    # difference is the whole record, not one field.
+    #
+    # Phase 5.1 made `pipeline_execution_id` the hash key of a GSI so the
+    # executor can find the verdict for the deploy it is about to perform.
+    # DynamoDB permits empty strings in ordinary attributes but REJECTS them in
+    # key attributes, index keys included. So `or ""` would have turned every
+    # manual invoke of the gate -- no CodePipeline job, no execution ID -- into a
+    # ValidationException that failed the entire PutItem. Not a missing field: no
+    # audit record at all, for exactly the invocations used to test the thing.
+    #
+    # Leaving the attribute out instead means the item is simply not present in
+    # the index, which is the correct answer to "which deploy did this verdict
+    # gate?" when there was no deploy. A sparse index is a feature here rather
+    # than a compromise.
+    if pipeline_execution_id:
+        item["pipeline_execution_id"] = pipeline_execution_id
+
+    return item
 
 
 class VerdictAuditWriter:

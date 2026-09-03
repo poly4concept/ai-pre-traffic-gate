@@ -1943,3 +1943,135 @@ CVE *introduced by the candidate* versus one it merely inherits — which the
 current set never separates. Note the ordering: new fixtures first, then edits.
 Labelling a fixture after seeing what the model said about its neighbours is
 already contaminated enough.
+
+---
+
+## D-064 — Two switches, armed separately, because they fail in opposite directions
+
+**Decision:** the executor's `EXECUTOR_ENFORCES_VERDICT` is a second switch,
+independent of the gate's `MODEL_VERDICT_CAN_ACT`. Both default off. Neither
+turns the other on.
+
+**Why not one flag.** They control different powers and break differently:
+
+| | controls | a bug here means |
+| --- | --- | --- |
+| `MODEL_VERDICT_CAN_ACT` (gate) | whether a verdict can HALT a pipeline | deploys that should have shipped, don't |
+| `EXECUTOR_ENFORCES_VERDICT` (executor) | whether a verdict picks the TRAFFIC SHIFT | a change ships faster than it should have |
+
+One over-blocks, the other under-protects. With a single flag, a bad pipeline
+run after the flip has two candidate causes and no way to separate them --
+and the two need opposite responses, so guessing wrong costs a second bad run.
+
+**The shadow position is not a no-op, which is what makes it worth having.**
+With the switch off the executor still performs the whole lookup, still maps
+the risk level to a deployment config, and logs the answer:
+
+```
+VERDICT SHADOW: verdict is low; would have used CodeDeployDefault.LambdaAllAtOnce
+VERDICT SHADOW: would have STOPPED this deploy -- verdict is HIGH risk
+```
+
+Then it deploys exactly as it did before Phase 5. So the shadow period is not a
+rehearsal that proves the code compiles -- those lines are the decisions the
+enforcing version would have made, and if they say STOPPED on runs that ought
+to have shipped, the switch is not ready.
+
+Same split as D-057: whether a mechanism is armed is a **choice** and choices
+are explicit; whether an armed mechanism fails open or closed is a **safety
+property** and is not configurable at all.
+
+---
+
+## D-065 — The executor reads the verdict; it cannot write one
+
+**Decision:** the executor's role gains `dynamodb:GetItem` on the verdict table
+and `dynamodb:Query` on one index. No write action of any kind.
+
+**Why this is the phase's actual security property.** Phase 5 is where a
+model-authored risk level starts choosing how much production traffic a new
+version receives. That is only defensible because no single component can both
+produce a verdict and act on one:
+
+| | can write a verdict | can deploy |
+| --- | --- | --- |
+| gate | yes | **no** |
+| executor | **no** | yes |
+
+Absent on purpose from the executor's policy: `PutItem`, `UpdateItem`,
+`DeleteItem`, `BatchWriteItem`. With any of them, the executor could
+manufacture a `low` verdict for itself and CLAUDE.md constraint 1 would be a
+comment rather than a control.
+
+`Query` is scoped to the **index ARN**, not the table. So the executor can look
+up the verdict for the execution it is running and cannot enumerate the audit
+trail by service. That distinction costs one line and removes a capability
+nothing needs.
+
+---
+
+## D-066 — Joined on the pipeline execution, not the job
+
+**Decision:** a second GSI, `by_pipeline_execution`, keyed on
+`pipeline_execution_id` with `recorded_at` as the range key.
+
+**Why the primary key cannot answer this.** `verdict_id` is the **gate's**
+CodePipeline job ID. Every pipeline ACTION gets its own job ID, so the
+executor's is a different string for the same deploy and it has no way to
+derive the gate's. The pipeline *execution* ID is the one identifier both
+actions genuinely share. Keying on the job ID would find nothing, on every run.
+
+**Why not make it the table's primary key instead,** which would give the
+executor a strongly consistent `GetItem` and remove the index entirely:
+because it collapses retries. A second gate attempt inside one execution would
+be refused by the conditional write, and the audit trail would silently keep
+the first attempt's verdict. This table's purpose is evidence; losing a record
+to save an index is the wrong trade.
+
+**Eventual consistency, stated rather than assumed.** A GSI read is *always*
+eventually consistent -- DynamoDB offers no strongly consistent read on a global
+secondary index, so this is a property of the lookup and not a setting we
+declined to enable. Two mitigations:
+
+1. The index is KEYS_ONLY, so the query picks the record and a `GetItem` with
+   `ConsistentRead=True` reads it. Eventual consistency is confined to choosing
+   a key, never to reading a verdict.
+2. The query retries three times, one second apart, before concluding there is
+   no verdict. Note the direction: this exists to avoid a **false halt**. Not
+   finding a verdict still stops the deploy — the retry only ensures that when
+   the executor says there is none, there really is none.
+
+**Range key `recorded_at`** so the query takes the newest. A re-run of the Gate
+action writes a second record and the later one is the current answer; without
+an ordering, "which of the two" would be arbitrary.
+
+---
+
+## D-067 — `high` has no deployment config, and unknown levels raise
+
+**Decision:** `DEPLOYMENT_CONFIG_FOR_RISK` maps `low` and `medium` only.
+`deployment_config_for` raises for everything else, `high` included.
+
+**On `high`.** There is no traffic percentage that makes a high-risk change safe
+to ship unattended. Mapping it to "the safest available canary" would look
+cautious and would still be a deploy. The only correct response is not to
+deploy, so the map has no entry and the function says why.
+
+Reaching that branch at all means the gate is in shadow or advisory while the
+executor is enforcing — an odd combination, and defence in depth is exactly what
+you want covering odd combinations. Two independent things must be
+misconfigured for a high-risk change to ship.
+
+**On the absent default, which is the more important half.** A `.get(level,
+CANARY)` would be the single most dangerous line in the executor. Feed it a
+level it does not recognise — a typo, a fourth level added to the enum and not
+to this map, a corrupted record — and it ships the change. The gate's
+`action_for` raises for the same reason (D-032): **a mapping that always answers
+is a mapping that answers wrongly when it does not know.**
+
+**Ordering, and it is not cosmetic.** `resolve_deployment_config` runs as the
+first statement of `start_deployment` — before the boto3 clients, before the
+artifact download, before `update_function_code`. Resolving the verdict after
+publishing would leave a numbered Lambda version behind on every blocked
+deploy: a half-performed deploy rather than a refused one. There is a test
+asserting the order rather than a comment asking for it.
