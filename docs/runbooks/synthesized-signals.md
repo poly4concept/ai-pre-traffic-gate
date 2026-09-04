@@ -263,3 +263,78 @@ terraform -chdir=infra/personal apply -var canary_rollback_on_alarm=false
 
 Account returns to near-zero standing cost: three CloudWatch alarms (≈$0.40/mo),
 two on-demand DynamoDB tables (≈$0), and the Lambdas.
+
+---
+
+## Phase 5.3 — overriding a halt
+
+The gate halted a deploy. You have read the email, you disagree, and you want to
+ship it anyway.
+
+```powershell
+$env:AWS_PROFILE = 'poly4'
+
+python scripts/override.py allow <execution-id> `
+    --reason "known flaky alarm, fix is urgent" --retry
+```
+
+The execution ID is in the escalation email, and the email prints this exact
+command. `--retry` re-runs the Gate stage; without it nothing happens, because
+the gate already ran and reported minutes ago.
+
+### The three things worth knowing about it
+
+**It applies to one execution.** The row is keyed by pipeline execution ID, and
+those are never reused. There is no way to write one of these that affects the
+next deploy — which is the failure mode that makes
+`terraform apply -var gate_decision=allow` dangerous, where one urgent Friday
+bypass leaves the gate off until Tuesday.
+
+**It expires in an hour.** Change it with `--ttl-minutes`. An expired override is
+ignored and the model's verdict stands.
+
+**The reason is mandatory** and goes in the audit record, along with your STS
+ARN. This row is the only explanation anybody will ever have for why the gate was
+bypassed on this deploy.
+
+### Inspecting and undoing
+
+```powershell
+python scripts/override.py show <execution-id>     # incl. whether it is still live
+python scripts/override.py list                    # recent overrides
+python scripts/override.py revoke <execution-id>   # delete it
+```
+
+`show` on an expired override prints a note explaining why a row you can still
+see is doing nothing: DynamoDB TTL deletes lazily, up to 48 hours late, so the
+gate checks the timestamp itself rather than trusting the row's absence.
+
+### Stopping a deploy the gate was happy with
+
+The same mechanism, other direction:
+
+```powershell
+python scripts/override.py halt <execution-id> --reason "customer incident, freeze"
+```
+
+No `--retry` — the stage has not failed, so there is nothing to re-run. This is
+only useful before the Gate stage runs, or ahead of a retry somebody else
+triggers. **For a real freeze use the break-glass lever instead**, which applies
+to every execution rather than one:
+
+```powershell
+terraform -chdir=infra/personal apply -var="gate_decision=halt"
+```
+
+A per-execution `allow` cannot defeat that, deliberately (D-072). If either
+source says halt, the gate halts.
+
+### Traps
+
+| Symptom | Cause |
+| --- | --- |
+| `StageNotRetryableException` | the Gate stage did not fail, so there is nothing to retry. If the gate did not halt, the change is already through. |
+| `AccessDeniedException` on the write | you are running as `ai-agent`. The gate holds `GetItem` only and nothing in the running system can write here — that is the design. Use `poly4`. |
+| override written, nothing happened | you did not retry the stage. `--retry`, or `override.py retry <id>`. |
+| override ignored, model verdict used | it expired. `show` will say so. |
+| gate halted **despite** an `allow` override | check `GATE_DECISION` — an infrastructure-level halt wins (D-072). Also check the reason was not blank; a reasonless override fails closed. |

@@ -1397,3 +1397,60 @@ Worth noting how it was found: not by a test, and not by `terraform validate`.
 By writing the index, then going back to check what actually gets written into
 the column it keys on. The test asserting it now exists because of that read,
 not the other way round.
+
+---
+
+## F-021 — A comma in a tag value, found after typing `yes`
+
+**Symptom.** `terraform validate` passed. `terraform plan` passed and printed
+`1 to add, 3 to change, 0 to destroy`. The apply then failed on the first
+resource it tried to create:
+
+```
+Error: creating AWS DynamoDB Table (ai-pre-traffic-gate-overrides):
+api error ValidationException: The Tag Value provided is invalid,
+Value: Human overrides of gate verdicts, scoped to one pipeline execution
+```
+
+**Cause.** The comma. AWS tag values permit unicode letters, digits, whitespace
+and `_ . : / = + - @`, and nothing else. I had written a sentence into a tag.
+
+**Why nothing local caught it, which is the part worth keeping.** The constraint
+belongs to the *service*, not to the Terraform provider's schema:
+
+  * `terraform validate` checks syntax and provider schema. A tag value is a
+    string, and this was a string.
+  * `terraform plan` diffs desired state against real state. It sends nothing
+    to DynamoDB's `CreateTable` validator, because nothing is being created yet.
+
+So there was no local step that *could* have known. The first thing capable of
+rejecting it was an apply that had already begun creating resources — which is
+the expensive place to find out, and in a multi-resource apply is where you get
+a half-built stack.
+
+**Second-order cause, and the more useful one:** I put documentation in a tag.
+The value read like a comment because I was writing it like a comment. A tag is
+an index key — something you filter and group by in a cost report — and the
+explanation belonged in the file, three lines above, where it already was.
+
+**Fix.** `Purpose = "Human overrides of gate verdicts"`, plus
+`tests/test_terraform_tags.py`: scan every `tags` block in the stack and assert
+each value matches AWS's character set. Fifteen lines that move this class of
+error from apply time to test time.
+
+Two details in that test worth noting, because a guard written carelessly is
+worse than none:
+
+  * It asserts it **found** tags at all. The real risk with a regex scanner is
+    not a false failure, it is silently matching nothing and passing forever.
+  * It caught a false positive on its first run — `${var.project_name}-verdicts`
+    contains `$ { }`, which AWS never sees because Terraform substitutes it
+    first. Interpolations now collapse to a placeholder and the literal text
+    around them is what gets checked. The limit is stated in the file: it cannot
+    see inside a variable.
+
+**The general lesson.** Local validation covers syntax and schema; services have
+their own validators and only run them when you call them. Any constraint that
+lives on the far side of an API call is a constraint your plan cannot see, and
+the cheap way to pull it forward is a test that encodes the rule — not a
+carefully-worded comment asking the next person to remember.

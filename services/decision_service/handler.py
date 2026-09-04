@@ -59,6 +59,12 @@ from escalation import (
     build_subject,
     escalation_topic_arn,
 )
+from overrides import (
+    Override,
+    OverrideReader,
+    OverrideSource,
+)
+from overrides import build_dynamodb_client as build_override_client
 from signals import (
     DeployCadenceCollector,
     DisabledCollector,
@@ -153,6 +159,14 @@ BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku
 # write does not halt a judged deploy.
 VERDICT_TABLE = os.environ.get("VERDICT_TABLE", "")
 
+# Phase 5.3. Where per-execution human overrides live. Absent means the only
+# override path is GATE_DECISION, which is the break-glass lever rather than the
+# everyday one -- a working configuration, and the one this repo ships with.
+#
+# The gate holds GetItem on this table and no write action at all. A gate that
+# could write its own override could approve itself.
+OVERRIDE_TABLE = os.environ.get("OVERRIDE_TABLE", "")
+
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # Where Bedrock is called, which is not necessarily where this function runs.
@@ -163,24 +177,99 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "").strip() or AWS_REGION
 
 
-def resolve_override(raw: str) -> tuple[str | None, str]:
-    """Map GATE_DECISION to a manual override, or to no override at all.
+def resolve_env_override(raw: str) -> Override | None:
+    """Map GATE_DECISION to an override, or to none at all.
 
-    Returns (override, reason). `None` means nobody intervened and the model's
-    verdict stands -- the normal case, and the reason this function replaced
-    `resolve_decision` rather than being renamed.
+    This is the break-glass lever, not the everyday one. It is a Terraform
+    variable, so it applies to every execution until somebody changes it back --
+    which is exactly what you want for "stop all deploys, something is wrong"
+    and exactly what you do not want for "let this one change through". Phase
+    5.3 added the per-execution path for the second case and kept this for the
+    first.
 
-    Note that an *unrecognised* value still halts. A misspelled override is
-    somebody trying to steer the gate and failing, which is exactly when
-    guessing their intent is least appropriate.
+    An *unrecognised* value still halts. A misspelled override is somebody
+    trying to steer the gate and failing, which is when guessing their intent is
+    least appropriate.
     """
     if not raw:
+        return None
+    if raw in (ALLOW, HALT):
+        return Override(
+            decision=raw,
+            reason=f"GATE_DECISION={raw} set at the infrastructure level",
+            source=OverrideSource.ENV,
+        )
+    return Override(
+        decision=HALT,
+        reason=f"GATE_DECISION={raw!r} is not a recognised override; failing closed",
+        source=OverrideSource.ENV,
+    )
+
+
+def resolve_override(raw: str, record: Override | None = None) -> tuple[str | None, str]:
+    """Combine the two override sources into one decision.
+
+    Returns (decision, reason). `None` means nobody intervened and the model's
+    verdict stands -- the normal case.
+
+    THE PRECEDENCE RULE: THE MOST RESTRICTIVE WINS.
+
+    Not "the more specific wins", which is the instinct and is wrong here. If
+    somebody has set `GATE_DECISION=halt` at the infrastructure level they have
+    stopped all deploys, and a per-execution row saying `allow` must not be able
+    to defeat that -- otherwise the global stop is not a stop, it is a
+    suggestion, and the person who set it has no way to know.
+
+    It runs the other way too: a per-execution `halt` beats an environment-level
+    `allow`. Whoever is closest to the specific change gets to be more cautious
+    than the default, never less.
+
+    So: if either source says halt, halt. That is one rule covering both
+    directions, and it is the rule that cannot produce a deploy nobody
+    authorised.
+    """
+    env = resolve_env_override(raw)
+    sources = [o for o in (env, record) if o is not None]
+
+    if not sources:
         return None, "no manual override; the model's verdict stands"
-    if raw == ALLOW:
-        return ALLOW, "manually overridden to allow"
-    if raw == HALT:
-        return HALT, "manually overridden to halt"
-    return HALT, f"GATE_DECISION={raw!r} is not a recognised override; failing closed"
+
+    halts = [o for o in sources if o.decision == HALT]
+    if halts:
+        # Named so the audit record says which lever stopped it. "A human
+        # halted this" and "the infrastructure is in a global stop" are
+        # different mornings.
+        chosen = halts[0]
+        if len(sources) > 1:
+            return HALT, f"{chosen.describe()} (most restrictive of {len(sources)} overrides)"
+        return HALT, chosen.describe()
+
+    return ALLOW, sources[0].describe()
+
+
+def load_record_override(
+    execution_id: str | None,
+    *,
+    reader: Any = None,
+) -> Override | None:
+    """Look up a per-execution override. Never raises.
+
+    Absent everything -- no table, no execution ID, no row, an unreadable table
+    -- means no override, which means the model's verdict stands, which already
+    fails closed on its own. There is nothing here that needs to invent a
+    decision.
+    """
+    if not execution_id:
+        return None
+    if reader is None:
+        if not OVERRIDE_TABLE:
+            return None
+        reader = OverrideReader(OVERRIDE_TABLE, build_override_client(AWS_REGION))
+    try:
+        return reader.load(execution_id)
+    except Exception:
+        logger.exception("override lookup failed; proceeding without one")
+        return None
 
 
 def resolve_mode(raw: str) -> tuple[str, str | None]:
@@ -235,10 +324,11 @@ def build_gate_record(
     outcome: VerdictOutcome,
     request_id: str,
     now: datetime | None = None,
+    record_override: Override | None = None,
 ) -> dict[str, Any]:
     """Assemble the structured line that says what the gate decided and did."""
     verdict = outcome.verdict
-    override, override_reason = resolve_override(GATE_DECISION)
+    override, override_reason = resolve_override(GATE_DECISION, record_override)
     mode, mode_warning = resolve_mode(GATE_MODE)
 
     model_decision = HALT if verdict.is_blocking else ALLOW
@@ -273,6 +363,12 @@ def build_gate_record(
         # the model also said allow" and "the model said allow" are different
         # events, and only one of them means the gate was trusted.
         record["override"] = {"decision": override, "reason": override_reason}
+        if record_override is not None:
+            # Who, and from where. The old GATE_DECISION path could say a human
+            # overrode the gate and could never say which human.
+            record["override"]["actor"] = record_override.actor
+            record["override"]["source"] = record_override.source
+            record["override"]["created_at"] = record_override.created_at
         record["model_decision"] = model_decision
     if mode_warning:
         record["mode_warning"] = mode_warning
@@ -499,6 +595,7 @@ def lambda_handler(
     verdict_client: Any = None,
     audit_writer: Any = None,
     escalator: Any = None,
+    override_reader: Any = None,
 ) -> dict[str, Any]:
     """Judge a deploy. Records everything; in Phase 3, acts on nothing.
 
@@ -546,8 +643,24 @@ def lambda_handler(
             ),
         )
 
-    gate = build_gate_record(outcome=outcome, request_id=request_id)
+    # Looked up AFTER the verdict, deliberately. The model is asked either way,
+    # even when a human has already decided, because "the human overrode a
+    # verdict the model got right" and "the human overrode one it got wrong" are
+    # the two most useful rows in the whole table -- and you only have them if
+    # the model was asked. One inference is a rounding error against knowing
+    # whether your override rate is justified.
+    execution_id = _pipeline_execution_id(job)
+    record_override = load_record_override(execution_id, reader=override_reader)
+
+    gate = build_gate_record(
+        outcome=outcome,
+        request_id=request_id,
+        record_override=record_override,
+    )
     gate["verdict_id"] = verdict_id
+    # Carried so the escalation email can print the exact override command for
+    # this deploy rather than a runbook reference.
+    gate["pipeline_execution_id"] = execution_id
 
     # Written before the pipeline is told anything. If the audit write and the
     # pipeline report disagree about ordering, the record of a halt should exist
@@ -559,7 +672,7 @@ def lambda_handler(
                 outcome=outcome,
                 gate=gate,
                 verdict_id=verdict_id,
-                pipeline_execution_id=_pipeline_execution_id(job),
+                pipeline_execution_id=execution_id,
                 writer=audit_writer,
             )
         except Exception:

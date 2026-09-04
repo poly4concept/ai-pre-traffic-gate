@@ -2194,3 +2194,154 @@ where that goes wrong.
 **How it was found:** not by a test, and not by review. By printing the email to
 a terminal and reading it as though it had arrived at 19:40 on a Friday. Worth
 doing for anything a human is meant to act on.
+
+---
+
+## D-071 — An override is scoped to one pipeline execution and expires by itself
+
+**Decision:** human overrides are rows in a DynamoDB table keyed by
+`pipeline_execution_id`, with a mandatory reason, the caller's STS ARN, and a
+60-minute expiry. `GATE_DECISION` stays as the break-glass lever.
+
+**What was wrong with what we had.** `GATE_DECISION` has worked since Phase 1,
+in the sense that setting it to `halt` halts. It is not an override path — it is
+a Terraform variable — and it has four problems in ascending order of severity:
+
+1. It needs admin credentials and Terraform on the machine of whoever is trying
+   to ship a fix at 20:00.
+2. It is slow: an apply, then a new pipeline run.
+3. It is anonymous. The audit record could say a human overrode the gate and
+   could never say which human.
+4. **It is not scoped to one deploy.** `gate_decision=allow` applies to every
+   execution from then until somebody remembers to change it back.
+
+Number 4 is the one that converts a safety feature into a liability. Somebody
+bypasses the gate for one urgent Friday fix, and the gate is off until Tuesday —
+silently, while continuing to write verdicts that look completely normal. Every
+deploy over the weekend is recorded as having been judged and none of them were
+gated.
+
+**Why the execution ID is the right key.** A CodePipeline execution ID is unique
+and never reused, so there is no way to write one of these rows such that it
+affects the next deploy. The scoping is a property of the key rather than of
+anyone's discipline.
+
+**Why it expires anyway,** given the scoping already bounds it: defence against
+the case where the row is written and the pipeline is never retried. An override
+is a statement about a deploy happening *now*. If nothing has consumed it within
+the hour, whatever prompted it has moved on. The failure mode where somebody
+forgets is bounded by a clock rather than by memory.
+
+**A mandatory reason.** The row is the only explanation the audit trail will ever
+have for why the gate was bypassed. An override with no reason fails closed
+rather than being honoured — enforced in the gate, and checked in the script
+before the write so the operator finds out immediately rather than through a
+confusing pipeline run.
+
+**Attribution comes from STS, not from a flag.** `sts:GetCallerIdentity`, not
+`--user`. An attribution somebody types is not an attribution.
+
+---
+
+## D-072 — The most restrictive override wins, not the most specific
+
+**Decision:** with two override sources in play, if *either* says halt, the gate
+halts.
+
+**Why not "the more specific wins",** which is the instinct and is wrong here.
+If somebody has set `GATE_DECISION=halt` at the infrastructure level they have
+stopped all deploys — a release freeze, an incident, a compromised dependency. A
+per-execution row saying `allow` must not be able to defeat that. Otherwise the
+global stop is not a stop, it is a suggestion, and the person who set it has no
+way to find out it was bypassed.
+
+It runs the other way too, which is what makes the rule coherent rather than
+just cautious: a per-execution `halt` beats an environment-level `allow`.
+Whoever is closest to the specific change gets to be **more** cautious than the
+default, never less.
+
+**One rule, both directions, and it cannot produce a deploy nobody authorised:**
+
+| GATE_DECISION | per-execution row | result |
+| --- | --- | --- |
+| unset | unset | the model's verdict |
+| unset | allow | allow |
+| unset | halt | halt |
+| allow | halt | **halt** |
+| halt | allow | **halt** |
+| halt | unset | halt |
+
+The audit record names which source stopped it. "A human halted this specific
+deploy" and "the infrastructure is in a global freeze" are different mornings.
+
+---
+
+## D-073 — Overrides live in their own table, because the IAM boundary is the point
+
+**Decision:** a second DynamoDB table rather than a key prefix in the verdicts
+table.
+
+**Why.** The gate must be able to WRITE verdicts and must NOT be able to write
+overrides. A gate that could write its own override could approve itself, and
+every other control in this project becomes decorative — the read-only signal
+collectors, the absent deploy permissions, all of it, defeated by one PutItem.
+
+One table would mean granting the gate `PutItem` on it and then carving
+overrides back out with a `dynamodb:LeadingKeys` condition. That is possible and
+it is fiddly, and **a fiddly IAM condition is a security control nobody
+reviewing the repo can verify at a glance.** Two tables makes the boundary a
+line anyone can read:
+
+    verdicts    gate: PutItem      executor: Query
+    overrides   gate: GetItem      executor: -
+
+Nothing in the running system can write to the override table. It is written by
+a person, from a laptop, with admin credentials. Cost of the second table:
+on-demand, a handful of rows that expire within the hour, zero.
+
+**The general form:** when a security boundary can be expressed either as a
+condition on a shared resource or as two separate resources, prefer two
+resources. The reviewer's ability to check it at a glance is part of the
+control.
+
+---
+
+## D-074 — DynamoDB TTL is housekeeping; the expiry check is in code
+
+**Decision:** the override table has a TTL attribute AND the gate checks
+`expires_at` itself in Python. The second one is the one that matters.
+
+**Why both.** DynamoDB deletes expired items **lazily** — the documented window
+is up to 48 hours after the timestamp passes. Relying on TTL to stop honouring
+an override would leave a two-day hole in which an expired override is still a
+perfectly readable row that the gate would obey.
+
+So TTL keeps the table tidy, and the timestamp comparison keeps it correct.
+`scripts/override.py show` says as much when it prints an expired row that is
+still visible, because "I can see the row and the gate is ignoring it" is
+otherwise a confusing five minutes.
+
+**Worth saying plainly because it is an easy mistake:** a lazy deletion
+mechanism is not an access control. The same applies to S3 lifecycle rules,
+Redis key eviction, and log retention — all of them are cost management, and
+none of them are guarantees about what is still readable.
+
+---
+
+## D-075 — The model is asked even when a human has already decided
+
+**Decision:** the override lookup happens *after* the Bedrock call, and does not
+short-circuit it.
+
+**The cheaper design** would check for an override first and skip the inference
+when one exists. It saves an inference, about $0.003.
+
+**Why we don't.** The two most valuable rows in the whole verdict table are "the
+human overrode a verdict the model got right" and "the human overrode one it got
+wrong", and you only have either if the model was asked. Skipping the call to
+save a third of a cent throws away the measurement that tells you whether your
+override rate is justified — which is precisely what Phase 8 is for, and
+precisely the number that decides whether this gate is trusted or worked around.
+
+An override is not a reason to stop measuring. It is one of the more interesting
+things to measure.

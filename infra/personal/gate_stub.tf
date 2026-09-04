@@ -216,6 +216,22 @@ data "aws_iam_policy_document" "gate_stub" {
     ]
   }
 
+  # Phase 5.3 -- reading a human override. GetItem, and nothing else.
+  #
+  # Read this statement against the one above it. The gate can WRITE a verdict
+  # and can only READ an override. That asymmetry is the point: a gate able to
+  # write its own override could approve itself, which would make every other
+  # control in this project decorative.
+  #
+  # Absent on purpose: PutItem, UpdateItem, DeleteItem, BatchWriteItem. Nothing
+  # in the running system can write to the override table. It is written by a
+  # person, from a laptop, with admin credentials.
+  statement {
+    sid       = "ReadHumanOverride"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.overrides.arn]
+  }
+
   # Phase 5.2 -- telling a human. Publish only, to exactly one topic.
   #
   # Note what is absent: no sns:Subscribe, no sns:SetTopicAttributes, no
@@ -324,6 +340,11 @@ resource "aws_lambda_function" "gate_stub" {
       # distinctly from `failed` so an unset topic cannot be misread in a log as
       # an email that did not arrive.
       ESCALATION_TOPIC_ARN = aws_sns_topic.escalations.arn
+
+      # Phase 5.3. Per-execution human overrides. Absent leaves GATE_DECISION as
+      # the only override path, which is the break-glass lever rather than the
+      # everyday one.
+      OVERRIDE_TABLE = aws_dynamodb_table.overrides.name
 
       # Phase 3.5. Which model forms the verdict. Env-driven so Phase 4 can
       # sweep several models over one fixture set without a code change.

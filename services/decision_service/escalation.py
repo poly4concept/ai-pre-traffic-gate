@@ -258,6 +258,21 @@ def build_body(gate: dict[str, Any], bundle: Any, service: str) -> str:
         "The full signal bundle and raw model output are in the verdict table.",
     ]
 
+    # Phase 5.3. An escalation that describes a problem and not the remedy makes
+    # the reader go and find the runbook, at the worst possible moment. The
+    # execution ID is right here, so the exact command can be too.
+    execution_id = gate.get("pipeline_execution_id")
+    if execution_id and action == "halt_pipeline":
+        lines += [
+            "",
+            "TO OVERRIDE THIS ONE DEPLOY",
+            "  Needs admin credentials. Applies to THIS execution only and",
+            "  expires in 60 minutes -- it cannot leave the gate switched off.",
+            "",
+            f"    python scripts/override.py allow {execution_id} \\",
+            '        --reason "why you are shipping it anyway" --retry',
+        ]
+
     return _clip("\n".join(lines), MAX_BODY_CHARS)
 
 
