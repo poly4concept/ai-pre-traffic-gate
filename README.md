@@ -234,7 +234,7 @@ Each phase must work before the next begins.
 | 2.5 | Synthesised-real signals — controllable faults, genuine findings | 2.5a/b/d done; 2.5c (Inspector CVEs) deferred |
 | 3 | Verdict layer, shadow mode only | code complete, awaiting a live model call |
 | 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | **done.** Haiku 4.5 measured at 81.0% acceptable / 30% under-flagging, losing to the arithmetic baseline (85.7% / 20%). Results and the reasoning in [evals/results/](evals/results/) |
-| 5 | Enforcement + escalation — executor, canary/halt, human override | not started |
+| 5 | Enforcement + escalation — executor, canary/halt, human override | 5.1 done (executor reads the verdict, branches on risk); 5.2 done (SNS escalation, advisory mode now notifies). Both behind switches that are still off |
 | 6 | Demo and talk assets | not started |
 | 7 | Company environment hardening | not started |
 | 8 | Soak — simulated traffic, measured results | not started |

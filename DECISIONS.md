@@ -2075,3 +2075,122 @@ artifact download, before `update_function_code`. Resolving the verdict after
 publishing would leave a numbered Lambda version behind on every blocked
 deploy: a half-performed deploy rather than a refused one. There is a test
 asserting the order rather than a comment asking for it.
+
+---
+
+## D-068 — Advisory mode is where the emails start, and that is what makes it a mode
+
+**Decision:** `NOTIFYING_MODES = {"advisory", "enforcing"}`, alongside the
+existing `BLOCKING_MODES = {"enforcing"}`. Shadow records and says nothing.
+
+**Why this needed deciding at all.** Until Phase 5.2, `shadow` and `advisory`
+did *exactly the same thing*: form a verdict, write a record, take no action.
+CLAUDE.md calls for "advisory mode before enforcing mode" as a rollout step, and
+that step had nothing in it — moving from shadow to advisory changed a string in
+an environment variable and no observable behaviour.
+
+Two sets, two questions, and they are genuinely independent:
+
+| mode | records | tells a human | blocks |
+| --- | --- | --- | --- |
+| shadow | yes | no | no |
+| advisory | yes | **yes** | no |
+| enforcing | yes | yes | **yes** |
+
+**Why notifying and blocking must be separate rollout stages.** They fail
+differently and the fixes are opposite. A gate that emails too much trains
+people to filter it; a gate that blocks too much gets switched off. Advisory
+exists precisely to find out whether a halt email is signal or noise *at a stage
+where being wrong costs an unnecessary email rather than a blocked release*.
+
+Turn both on at once and the first bad week gives you two hypotheses and no way
+to separate them — the same argument as the two switches in 5.1, applied one
+layer up.
+
+**Escalation is one condition, not four.** `decision == HALT and mode in
+NOTIFYING_MODES`. Everything worth escalating already collapses into that:
+
+  * the model returned high risk
+  * Bedrock was unreachable, so the verdict failed closed to high
+  * required signals were missing, so the gate refused to ask
+  * a human forced a halt
+
+All four are "a deploy is not going out and somebody should know why". Written
+as one condition rather than four, the fifth way of halting that Phase 7
+invents notifies without anyone remembering to add it here. The failure mode
+most likely to happen at 3am is the one nobody wrote a branch for.
+
+**Deliberately not escalated: medium risk.** A canary is the system working as
+designed. An email for every canary is how a person learns to filter this
+sender, and then the one that mattered arrives in the same folder.
+
+---
+
+## D-069 — The escalation topic is not encrypted at rest, on purpose, for now
+
+**Decision:** `aws_sns_topic.escalations` has no `kms_master_key_id`.
+
+**Why, and this is a sequencing argument rather than a security one.** The
+obvious choice is SSE with the AWS-managed `alias/aws/sns` key, which is free.
+The problem is that the AWS-managed key does not exist in an account until SNS
+SSE is first used there. Scoping the gate's IAM statement to it requires the key
+ARN, which requires a `data "aws_kms_alias"` lookup, which fails on a clean
+apply in a fresh account. A chicken-and-egg dependency in the one file a
+first-time reader of this repo will run.
+
+**What is actually at risk.** The payload is a verdict, its reasoning, signal
+summaries and a commit message — every field of which is already in CloudWatch
+Logs, and the commit message is in the repository. There are no credentials, no
+customer data and no secrets in an escalation by construction.
+
+**Where it belongs instead.** Phase 7, against a customer-managed key created in
+the same apply, where the key policy can be written deliberately rather than
+inherited. That is the hardening phase, this is the personal account, and
+recording the omission as a decision is the difference between a considered
+trade and a gap somebody finds later.
+
+**The general point:** "free and obviously correct" and "correct to do right
+now" are different questions. A control that adds a bootstrap dependency to a
+demo repo has a cost that does not show up on the bill.
+
+---
+
+## D-070 — An escalation speaks only for the component that sent it
+
+**Decision:** the email says what the *gate* did. It makes no claim about what
+the pipeline will do.
+
+**The wording this replaced,** which I wrote first and only caught by rendering
+an actual email and reading it:
+
+> The gate is in ADVISORY mode and does not block. It would have stopped this
+> deploy; **the deploy is proceeding.**
+
+That last clause is false in a configuration that is not hypothetical. Once
+`EXECUTOR_CAN_BRANCH` is on (5.1), the executor independently refuses a
+high-risk verdict. In advisory mode both things happen at once: the gate lets
+the change through and the executor stops it a stage later. The email would
+describe a deploy that never occurred.
+
+**Now:**
+
+> The gate did NOT block this deploy -- it is in ADVISORY mode. It would have
+> stopped it. The change is continuing through the pipeline. A later stage may
+> still refuse it.
+
+**Why this is the same bug as the subject line.** `[HALTED]` versus
+`[WOULD HALT]` exists because an email claiming a deploy was stopped when it
+shipped costs the next three real halts their credibility. "The deploy is
+proceeding" is the identical error pointing the other way — over-claiming
+knowledge the sender does not have. Fixing one and not the other would have been
+inconsistent in a way that only shows up when somebody is relying on the email.
+
+**The transferable version:** once a system has more than one component that can
+refuse, no single component can report the outcome — only its own contribution
+to it. Every notification should be scoped to the thing that sent it, and the
+temptation to write the friendlier, more complete-sounding sentence is exactly
+where that goes wrong.
+
+**How it was found:** not by a test, and not by review. By printing the email to
+a terminal and reading it as though it had arrived at 19:40 on a Friday. Worth
+doing for anything a human is meant to act on.

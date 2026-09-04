@@ -51,6 +51,14 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from escalation import (
+    EscalationStatus,
+    SnsEscalator,
+    build_body,
+    build_sns_client,
+    build_subject,
+    escalation_topic_arn,
+)
 from signals import (
     DeployCadenceCollector,
     DisabledCollector,
@@ -95,6 +103,21 @@ VALID_MODES = frozenset({"shadow", "advisory", "enforcing"})
 # both record and report; only enforcing acts. A set so that adding a mode later
 # is a data change rather than a new branch in the control flow.
 BLOCKING_MODES = frozenset({"enforcing"})
+
+# Modes in which the gate tells a human. This is what finally makes the three
+# modes distinct -- until Phase 5.2 `shadow` and `advisory` behaved identically,
+# which meant CLAUDE.md's "advisory mode before enforcing mode" was a rollout
+# step with nothing in it.
+#
+#   shadow     record it, say nothing        (measure the over-flagging rate)
+#   advisory   record it, TELL SOMEBODY      (find out if the emails are useful
+#                                             before they can also block you)
+#   enforcing  record it, tell somebody, act
+#
+# The ordering is the point. Advisory is where you learn whether a halt email is
+# signal or noise, at a stage where being wrong costs an unnecessary email
+# rather than a blocked release.
+NOTIFYING_MODES = frozenset({"advisory", "enforcing"})
 
 GATE_DECISION = os.environ.get("GATE_DECISION", "").strip().lower()
 GATE_MODE = os.environ.get("GATE_MODE", "").strip().lower()
@@ -402,6 +425,64 @@ def write_audit_record(
     return writer.record(item).status
 
 
+def should_escalate(*, decision: str, mode: str) -> bool:
+    """Does this warrant waking somebody up?
+
+    One condition, no special cases: the gate wanted to halt, and the mode is
+    one that notifies. Everything worth escalating already collapses into
+    `decision == HALT`:
+
+      * the model returned high risk
+      * the model could not be reached, so the verdict failed closed to high
+      * signals were missing, so the gate refused to ask
+      * a human forced a halt
+
+    All four are "a deploy is not going out and somebody should know why", and
+    writing them as one condition rather than four means a fifth way of halting
+    -- whatever Phase 7 invents -- notifies without anybody remembering to add it
+    here.
+
+    Deliberately NOT escalated: medium risk. A canary is the system working as
+    designed, and an email for every canary is how a person learns to filter
+    this sender.
+    """
+    return decision == HALT and mode in NOTIFYING_MODES
+
+
+def escalate(
+    *,
+    gate: dict[str, Any],
+    bundle: Any,
+    escalator: Any = None,
+) -> str:
+    """Notify a human. Returns a status; never raises.
+
+    Fails OPEN, which is the opposite of every other decision in this file and
+    is correct here. Everything in the verdict path fails closed because an
+    absent signal might be hiding a problem with the change. A failed
+    notification hides nothing about the change -- the deploy has already been
+    judged and the pipeline has already been told. Halting on it would let an
+    SNS outage take a release.
+    """
+    if not should_escalate(decision=gate["decision"], mode=gate["mode"]):
+        return EscalationStatus.SKIPPED
+
+    topic = escalation_topic_arn()
+    if escalator is None:
+        if not topic:
+            # A legitimate degraded mode, same as an unset VERDICT_TABLE: the
+            # gate still judges, still records, still halts. Named distinctly
+            # from FAILED so "nobody configured a topic" cannot be mistaken in a
+            # log for "the email did not arrive".
+            logger.warning("gate wanted to escalate but ESCALATION_TOPIC_ARN is unset")
+            return EscalationStatus.NOT_CONFIGURED
+        escalator = SnsEscalator(topic, build_sns_client(AWS_REGION))
+
+    subject = build_subject(gate, SERVICE_NAME)
+    body = build_body(gate, bundle, SERVICE_NAME)
+    return escalator.publish(subject, body).status
+
+
 def _pipeline_execution_id(job: dict[str, Any] | None) -> str | None:
     """Best-effort extraction. Absent is fine; wrong would not be."""
     if not job:
@@ -417,6 +498,7 @@ def lambda_handler(
     *,
     verdict_client: Any = None,
     audit_writer: Any = None,
+    escalator: Any = None,
 ) -> dict[str, Any]:
     """Judge a deploy. Records everything; in Phase 3, acts on nothing.
 
@@ -488,6 +570,19 @@ def lambda_handler(
             gate["audit"] = "failed"
     else:
         gate["audit"] = "no_bundle_to_record"
+
+    # After the audit write, before the pipeline is told. Ordering is deliberate
+    # on both sides: the durable record should exist before anyone is emailed a
+    # link to it, and the human should be on their way before the pipeline goes
+    # red -- so the email is not competing with a CI notification to explain why.
+    try:
+        gate["escalation"] = escalate(gate=gate, bundle=bundle, escalator=escalator)
+    except Exception:
+        # `escalate` does not raise, so reaching here means the message could not
+        # be BUILT -- a field of an unexpected shape, most likely. Still not
+        # grounds to change a decision already made and recorded.
+        logger.exception("could not build or send the escalation")
+        gate["escalation"] = EscalationStatus.FAILED
 
     # One structured line per evaluation. Always emitted, on every path, which is
     # what makes a DynamoDB failure a degradation rather than a loss.

@@ -302,3 +302,23 @@ variable "executor_enforces_verdict" {
   type        = bool
   default     = false
 }
+
+# Phase 5.2 -- who hears about a halt.
+#
+# Empty by default, and deliberately so: a `terraform apply` from a fresh clone
+# must not send mail to an address the repo's author hardcoded. Empty creates
+# the topic with no subscribers, which is a working configuration -- the gate
+# publishes and the message goes nowhere.
+variable "escalation_email" {
+  description = "Email address subscribed to gate escalations. Empty means no subscriber; the topic is still created."
+  type        = string
+  default     = ""
+
+  validation {
+    # Deliberately loose. This is a typo check, not an address validator --
+    # a regex strict enough to reject genuinely invalid addresses also rejects
+    # valid ones, and SNS is the real authority on whether it can deliver.
+    condition     = var.escalation_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$", var.escalation_email))
+    error_message = "escalation_email must be a plausible email address, or empty."
+  }
+}

@@ -743,3 +743,138 @@ def test_inspector_failure_does_not_block_the_bundle(monkeypatch):
     assert bundle.security.status is SignalStatus.UNAVAILABLE
     # Two of three collected, and a verdict is still permitted.
     assert bundle.has_required_signals
+
+
+# --- Escalation, wired into the whole path ---------------------------------
+#
+# Phase 5.2. The unit-level behaviour lives in test_escalation.py; these are the
+# properties that only appear once escalation is running inside the handler
+# alongside the audit write and the pipeline report.
+
+
+class RecordingEscalator:
+    """Captures what it was asked to send, and when."""
+
+    def __init__(self, status="sent", raises=None):
+        self.status = status
+        self.raises = raises
+        self.published = []
+        self.gate_at_publish = None
+
+    def publish(self, subject, body):
+        from escalation import EscalationResult
+
+        self.published.append((subject, body))
+        if self.raises:
+            raise self.raises
+        return EscalationResult(self.status)
+
+
+def run_with_escalator(handler, monkeypatch, escalator, *, outcome=None, writer=None):
+    monkeypatch.setattr(handler, "report_to_codepipeline", lambda *a: None)
+    return handler.lambda_handler(
+        {},
+        FakeContext(),
+        verdict_client=FakeVerdictClient(outcome or failed_outcome()),
+        audit_writer=writer or FakeAuditWriter(),
+        escalator=escalator,
+    )
+
+
+def load_notifying(monkeypatch, mode="enforcing"):
+    monkeypatch.setenv("ESCALATION_TOPIC_ARN", "arn:aws:sns:us-east-1:1:t")
+    monkeypatch.setenv("VERDICT_TABLE", "verdicts-test")
+    return load(monkeypatch, None, mode)
+
+
+def test_a_failed_escalation_does_not_change_the_decision(monkeypatch):
+    """THE PROPERTY THIS WHOLE PATH IS BUILT AROUND.
+
+    Escalation is the one thing in the project that fails OPEN. Everything in
+    the verdict path fails closed because an absent signal might be hiding a
+    problem with the change; a failed notification hides nothing about the
+    change, because the deploy has already been judged. Letting SNS take a
+    release would be the wrong kind of consistency.
+    """
+    handler = load_notifying(monkeypatch)
+    broken = RecordingEscalator(raises=RuntimeError("sns is down"))
+
+    gate = run_with_escalator(handler, monkeypatch, broken)
+
+    assert gate["decision"] == "halt"
+    assert gate["risk_level"] == "high"
+    assert gate["escalation"] == "failed"
+
+
+def test_a_failed_escalation_still_leaves_a_complete_audit_record(monkeypatch):
+    """The email is the redundant copy. The record is the one that has to survive."""
+    handler = load_notifying(monkeypatch)
+    writer = FakeAuditWriter()
+
+    gate = run_with_escalator(
+        handler, monkeypatch, RecordingEscalator(raises=RuntimeError("boom")), writer=writer
+    )
+
+    assert gate["audit"] == "written"
+    assert len(writer.items) == 1
+
+
+def test_the_escalation_status_is_recorded_on_every_path(monkeypatch):
+    """Including when nothing was sent. A gate record with no escalation field
+    cannot distinguish "did not need to" from "the code never ran"."""
+    handler = load_notifying(monkeypatch, mode="shadow")
+
+    gate = run_with_escalator(handler, monkeypatch, RecordingEscalator())
+
+    assert gate["escalation"] == "skipped"
+
+
+def test_the_audit_record_is_written_before_anyone_is_emailed(monkeypatch):
+    """Ordering, asserted rather than assumed.
+
+    The email points at a verdict_id. Sending it before the record exists means
+    the first thing a woken-up human does is look up a row that is not there
+    yet, at exactly the moment they are least inclined to give the system the
+    benefit of the doubt.
+    """
+    handler = load_notifying(monkeypatch)
+    order = []
+
+    class OrderedWriter(FakeAuditWriter):
+        def record(self, item):
+            order.append("audit")
+            return super().record(item)
+
+    class OrderedEscalator(RecordingEscalator):
+        def publish(self, subject, body):
+            order.append("escalate")
+            return super().publish(subject, body)
+
+    run_with_escalator(handler, monkeypatch, OrderedEscalator(), writer=OrderedWriter())
+
+    assert order == ["audit", "escalate"]
+
+
+def test_an_allowed_deploy_sends_nothing(monkeypatch):
+    handler = load_notifying(monkeypatch)
+    quiet = RecordingEscalator()
+
+    gate = run_with_escalator(handler, monkeypatch, quiet, outcome=model_outcome("low"))
+
+    assert gate["decision"] == "allow"
+    assert gate["escalation"] == "skipped"
+    assert quiet.published == []
+
+
+def test_a_human_halt_override_also_escalates(monkeypatch):
+    """A person forcing a halt is still a halt somebody else should hear about --
+    and it reaches the same single condition rather than a branch of its own."""
+    monkeypatch.setenv("ESCALATION_TOPIC_ARN", "arn:aws:sns:us-east-1:1:t")
+    handler = load(monkeypatch, "halt", "enforcing")
+    sent = RecordingEscalator()
+
+    gate = run_with_escalator(handler, monkeypatch, sent, outcome=model_outcome("low"))
+
+    assert gate["decision"] == "halt"
+    assert gate["escalation"] == "sent"
+    assert "HUMAN OVERRIDE WAS IN EFFECT" in sent.published[0][1]

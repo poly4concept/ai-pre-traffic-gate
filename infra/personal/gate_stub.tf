@@ -216,6 +216,19 @@ data "aws_iam_policy_document" "gate_stub" {
     ]
   }
 
+  # Phase 5.2 -- telling a human. Publish only, to exactly one topic.
+  #
+  # Note what is absent: no sns:Subscribe, no sns:SetTopicAttributes, no
+  # sns:CreateTopic. The gate can send a message to one address it does not
+  # control and cannot change who receives it. A gate that could add a
+  # subscriber could quietly redirect its own escalations, which is precisely
+  # the capability an attacker who reached this function would want.
+  statement {
+    sid       = "PublishEscalation"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.escalations.arn]
+  }
+
   # Phase 3.5 -- the verdict call itself.
   #
   # One model, three regions, one action. Note what is absent: no
@@ -304,6 +317,13 @@ resource "aws_lambda_function" "gate_stub" {
       # records nothing -- which is a legitimate degraded mode, not a failure,
       # for the same reason a failed audit write does not halt a judged deploy.
       VERDICT_TABLE = aws_dynamodb_table.verdicts.name
+
+      # Phase 5.2. Where a halt gets announced. Absent behaves like an absent
+      # VERDICT_TABLE: the gate judges, records and halts exactly as before and
+      # reports `not_configured` instead of sending -- a degraded mode, named
+      # distinctly from `failed` so an unset topic cannot be misread in a log as
+      # an email that did not arrive.
+      ESCALATION_TOPIC_ARN = aws_sns_topic.escalations.arn
 
       # Phase 3.5. Which model forms the verdict. Env-driven so Phase 4 can
       # sweep several models over one fixture set without a code change.
