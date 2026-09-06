@@ -40,12 +40,20 @@ import subprocess
 import sys
 from typing import Any
 
-# CodePipeline caps UserParameters at 1000 characters. The wrapper JSON around
-# our payload costs about 90, so the base64 blob must stay under ~900, which is
-# roughly 670 bytes of JSON. Budgeted conservatively -- exceeding the cap makes
-# CodePipeline reject the pipeline definition, which is a confusing failure at a
-# distance from its cause.
-MAX_B64_LENGTH = 860
+# CodePipeline caps UserParameters at 1000 characters, and everything else in
+# that JSON object comes out of this blob's budget.
+#
+#   {"trusted_commit_sha":"<40>","change_context_b64":"<N>",
+#    "pipeline_execution_id":"<36>"}
+#
+# The fixed keys and braces cost 76, the commit SHA 40, and the execution ID 36
+# -- 152 before a single byte of payload. Phase 5.4 added that third field
+# (F-023), which is why this dropped from 860: the previous budget plus the new
+# wrapper came to roughly 1012, and exceeding the cap makes CodePipeline reject
+# the whole pipeline definition -- a confusing failure a long way from its cause.
+#
+# 780 leaves ~68 characters of headroom rather than sitting on the limit.
+MAX_B64_LENGTH = 780
 
 # Trim order matters: paths first (individually least informative), then the
 # commit message, which carries intent and is worth keeping longest.

@@ -137,6 +137,19 @@ def build_record(
         "mode": mode,
         "action_taken": action_taken,
         "verdict": verdict.to_dict(),
+        # THE FIELD SHADOW MODE EXISTS TO PRODUCE, and it was missing until
+        # Phase 5.4 went looking for it (F-022). The handler's own docstring
+        # claimed it "accumulates in DynamoDB from today"; it reached the log
+        # line and stopped there.
+        #
+        # Stored rather than derived from `verdict.risk_level`, even though it
+        # is derivable today, because the mapping from risk level to blocking is
+        # a POLICY that can change. If `medium` ever becomes blocking, deriving
+        # would silently reinterpret every historical row under the new rule and
+        # the over-flagging trend would move for reasons that have nothing to do
+        # with the gate's behaviour. This freezes what the gate actually thought
+        # at the time -- the same argument as storing `prompt_version`.
+        "would_have_halted": verdict.is_blocking,
         # CLAUDE.md constraint 3: "every verdict is auditable and OVERRIDABLE",
         # and an override nobody recorded is indistinguishable from the gate
         # having decided that way on its own. Stored even when it agrees with the

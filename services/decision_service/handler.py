@@ -73,6 +73,7 @@ from signals import (
     PipelineChangeContextCollector,
     TargetHealthCloudWatchCollector,
     collect_signals,
+    extract_user_parameters,
 )
 from signals.types import DeploymentTarget
 from verdict import (
@@ -580,9 +581,43 @@ def escalate(
 
 
 def _pipeline_execution_id(job: dict[str, Any] | None) -> str | None:
-    """Best-effort extraction. Absent is fine; wrong would not be."""
+    """Which pipeline execution this verdict is about.
+
+    READ FROM USERPARAMETERS, NOT FROM pipelineContext, AND THAT WAS A BUG
+    (F-023).
+
+    This used to read `job.data.pipelineContext.pipelineExecutionId`, which
+    looks entirely plausible and does not exist. `pipelineContext` belongs to
+    the CUSTOM ACTION job structure returned by `PollForJobs`; the Lambda-invoke
+    event carries only `actionConfiguration`, `inputArtifacts`,
+    `outputArtifacts`, `artifactCredentials` and `continuationToken`.
+
+    So this returned None on every real pipeline run, silently. The attribute
+    was omitted from every verdict record, the `by_pipeline_execution` index
+    stayed empty, and both things built on it -- the executor's verdict lookup
+    (5.1) and the human override path (5.3) -- could never find anything.
+
+    CodePipeline does expose the value, as the built-in variable
+    `#{codepipeline.PipelineExecutionId}`, interpolated into UserParameters in
+    pipeline.tf the same way the trusted commit SHA already was.
+
+    The old path is still tried as a fallback. It costs nothing, and if a future
+    action type does populate `pipelineContext` this keeps working.
+    """
     if not job:
         return None
+
+    try:
+        params = extract_user_parameters({"CodePipeline.job": job})
+        execution = params.get("pipeline_execution_id")
+        if isinstance(execution, str) and execution:
+            return execution
+    except Exception:
+        # A malformed UserParameters is the change-context collector's problem
+        # to report, not this function's. Missing an execution ID degrades the
+        # override lookup; it must not take down the verdict.
+        logger.debug("could not read pipeline_execution_id from UserParameters")
+
     context = job.get("data", {}).get("pipelineContext", {})
     execution = context.get("pipelineExecutionId")
     return execution if isinstance(execution, str) and execution else None

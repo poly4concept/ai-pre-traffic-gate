@@ -182,7 +182,32 @@ def pipeline_execution_id(job: dict[str, Any]) -> str | None:
     the executor's are different strings for the same deploy. The execution ID
     is the same for every action in one run through the pipeline, which is
     exactly the join key needed here.
+
+    READ FROM USERPARAMETERS, NOT pipelineContext, AND THAT WAS A BUG (F-023).
+
+    This read `job.data.pipelineContext.pipelineExecutionId`, which does not
+    exist in a Lambda-invoke event -- `pipelineContext` belongs to the custom
+    action job structure returned by `PollForJobs`. It returned None on every
+    run, so `find_verdict` was never once called and the risk branching added in
+    5.1 had never executed. The logs said `VERDICT SHADOW: would have STOPPED
+    this deploy -- job carries no pipelineExecutionId`, which reads like the
+    shadow mode working rather than like a lookup that could never succeed.
+
+    CodePipeline exposes the value as `#{codepipeline.PipelineExecutionId}`,
+    interpolated into this action's UserParameters in pipeline.tf.
     """
+    config = job.get("data", {}).get("actionConfiguration", {}).get("configuration", {})
+    raw = config.get("UserParameters")
+    if isinstance(raw, str) and raw:
+        try:
+            execution = json.loads(raw).get("pipeline_execution_id")
+            if isinstance(execution, str) and execution:
+                return execution
+        except (ValueError, AttributeError):
+            logger.warning("UserParameters is not readable JSON; no execution ID")
+
+    # Fallback, kept because it costs nothing and would start working if a
+    # future action type populated it.
     context = job.get("data", {}).get("pipelineContext", {})
     execution = context.get("pipelineExecutionId")
     return execution if isinstance(execution, str) and execution else None

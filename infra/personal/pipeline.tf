@@ -611,6 +611,19 @@ resource "aws_codepipeline" "main" {
         UserParameters = jsonencode({
           trusted_commit_sha = "#{SourceVariables.CommitId}"
           change_context_b64 = "#{BuildVariables.CHANGE_CONTEXT_B64}"
+
+          # Phase 5.4, and it fixes a bug that had silently disabled 5.1 and
+          # 5.3 (F-023). Both the gate and the executor read this from
+          # `job.data.pipelineContext.pipelineExecutionId`, which does not
+          # exist in a CodePipeline Lambda-invoke event -- that key is part of
+          # the custom-action job structure, not this one. Every verdict since
+          # 5.1 was therefore written without an execution ID, leaving the
+          # `by_pipeline_execution` index empty and both lookups permanently
+          # unable to find anything.
+          #
+          # A UUID, so structurally safe to interpolate into JSON for the same
+          # reason the two values above are.
+          pipeline_execution_id = "#{codepipeline.PipelineExecutionId}"
         })
       }
     }
@@ -629,6 +642,13 @@ resource "aws_codepipeline" "main" {
 
       configuration = {
         FunctionName = aws_lambda_function.executor.function_name
+
+        # The executor needs the execution ID for the same reason the gate does
+        # -- it is the key the verdict was filed under (5.1). It has no change
+        # context to carry, so there is no budget pressure here.
+        UserParameters = jsonencode({
+          pipeline_execution_id = "#{codepipeline.PipelineExecutionId}"
+        })
       }
     }
   }

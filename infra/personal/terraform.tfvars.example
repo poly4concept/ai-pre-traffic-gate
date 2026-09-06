@@ -1,0 +1,47 @@
+# Copy to terraform.tfvars. That filename is git-ignored and is loaded
+# automatically, so `terraform apply` needs no -var flags.
+#
+# WHY THIS FILE EXISTS
+#
+# The settings below describe what stage of the rollout THIS stack is at. The
+# defaults in variables.tf stay deliberately safe -- a fresh clone gets shadow
+# mode, nothing enforcing, and no email subscriber -- because a stranger running
+# `terraform apply` should not end up with a gate that can block deploys or mail
+# an address the repo's author typed in.
+#
+# It also removes a footgun that has already bitten once: passing
+# `-var="escalation_email=..."` on every apply and forgetting it on one, which
+# silently DESTROYS the SNS subscription. A tfvars file cannot be forgotten.
+
+
+# Where halts get emailed. Empty creates the topic with no subscriber, which is
+# a working configuration -- the gate publishes and nothing receives it.
+#
+# After the first apply, check the inbox and click the AWS confirmation link.
+# Until you do, SNS reports every publish as successful and delivers nothing.
+escalation_email = "you@example.com"
+
+
+# shadow | advisory | enforcing
+#
+#   shadow      judges, records, says nothing.        Measures over-flagging.
+#   advisory    judges, records, EMAILS. Blocks nothing.
+#   enforcing   judges, records, emails, and STOPS THE PIPELINE.
+#
+# Advisory before enforcing is the point of having three modes: it is where you
+# find out whether a halt email is signal or noise, at a stage where being wrong
+# costs an unnecessary email rather than a blocked release.
+gate_mode = "advisory"
+
+
+# Whether the recorded risk level chooses the deployment config, and whether a
+# verdict that cannot be read stops the deploy.
+#
+#   false   the executor logs what it WOULD have done and canaries everything
+#   true    low -> all at once, medium -> canary, high -> refuse to deploy
+#
+# Separate from gate_mode on purpose. The gate blocking and the executor
+# branching fail in opposite directions and need opposite fixes, so turning them
+# on together means a bad week gives you two suspects and no way to separate
+# them. Turn this on while gate_mode is still `advisory`.
+executor_enforces_verdict = true

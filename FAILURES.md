@@ -1454,3 +1454,132 @@ their own validators and only run them when you call them. Any constraint that
 lives on the far side of an API call is a constraint your plan cannot see, and
 the cheap way to pull it forward is a test that encodes the rule — not a
 carefully-worded comment asking the next person to remember.
+
+---
+
+## F-022 — The field shadow mode exists to produce was never written down
+
+**Symptom.** Phase 5.4 set out to read `would_have_halted` out of the verdict
+table. It is not in the table. It has never been in the table.
+
+**What was actually happening.** `build_gate_record` computes it and puts it in
+the structured log line. `build_record` -- the function that assembles the
+DynamoDB item -- never carried it. So it reached CloudWatch Logs and stopped.
+
+**Why that is worse than an ordinary missing field.** The handler's own module
+docstring, written in Phase 3.5, says:
+
+> Shadow mode is worth more than it sounds. `would_have_halted` accumulates in
+> DynamoDB from today, so by the time enforcement is switched on there is a real
+> measured over-flagging rate to switch it on *with* -- rather than a guess and
+> an apology.
+
+That is the entire justification for running shadow mode, it is quoted from
+CLAUDE.md, and it was false for two phases. Nothing was accumulating. The plan
+was to turn enforcement on using evidence that did not exist, and the plan said
+so in a comment nobody re-read against the data.
+
+**Recoverable, as it happens.** `would_have_halted` is derivable from
+`verdict.risk_level` for the existing rows, and `gate_history.py` does that and
+labels those rows as derived. But deriving is strictly worse than storing,
+because the risk-to-blocking mapping is a POLICY that can change: if `medium`
+ever becomes blocking, every historical row would be silently reinterpreted
+under the new rule and the over-flagging trend would move for reasons that have
+nothing to do with the gate. Storing freezes what the gate actually thought at
+the time -- the same argument as `prompt_version`.
+
+**Fix.** `"would_have_halted": verdict.is_blocking` in `build_record`.
+
+**The lesson, and it is not "write more tests".** There were tests on
+`build_record`. They asserted the fields it does write. No test can notice a
+field nobody asked for. What found this was **opening the table and reading a
+row** -- which took one command and had not been done in two phases.
+
+A comment claiming a system accumulates evidence is not evidence that it does.
+
+---
+
+## F-023 — Two phases of work keyed on a field CodePipeline never sends
+
+**Symptom.** Investigating F-022 above, every verdict record turned out to be
+missing `pipeline_execution_id` too. Then the executor's logs, on all four real
+pipeline runs:
+
+```
+VERDICT SHADOW: would have STOPPED this deploy -- job carries no pipelineExecutionId
+```
+
+**Cause.** Both handlers read
+`job["data"]["pipelineContext"]["pipelineExecutionId"]`. That key does not exist
+in a CodePipeline **Lambda-invoke** event. `pipelineContext` belongs to the
+**custom action** job structure returned by `PollForJobs`. A Lambda invoke
+receives `actionConfiguration`, `inputArtifacts`, `outputArtifacts`,
+`artifactCredentials` and `continuationToken`, and nothing else.
+
+**What that silently disabled.** Everything keyed on the execution ID, which is
+two increments of work:
+
+  * **5.1** -- the executor's verdict lookup. `find_verdict` was never once
+    called. The risk branching, the deployment-config mapping, the fail-closed
+    refusal: none of it has ever executed.
+  * **5.3** -- the human override path. An override row written by
+    `scripts/override.py` could never have been found.
+  * The `by_pipeline_execution` GSI has been empty since it was created.
+
+**Why nothing caught it, and this is the part worth the slide.** From
+`tests/test_executor.py`:
+
+```python
+def verdict_job(execution_id="exec-1", job_id="job-1"):
+    return {"CodePipeline.job": {"id": job_id,
+            "data": {"pipelineContext": {"pipelineExecutionId": execution_id}}}}
+```
+
+I wrote that fixture from the same wrong assumption as the code. **The fixture
+and the bug agreed with each other**, so the tests passed, and passed
+convincingly -- there were assertions about lookup, about retries, about
+fail-closed behaviour on a missing verdict, all exercising a path that in
+production was never reached.
+
+> A test built from an event shape you invented validates your assumption, not
+> the integration.
+
+**Why the logs did not give it away either.** The executor fails safe. With the
+switch off, "could not find a verdict" and "found a verdict, taking no action"
+both emit a line starting `VERDICT SHADOW`. I read the line, saw the prefix I
+expected, and confirmed to Mubarak that the wiring worked. It did not. This is
+**F-016 exactly**, second occurrence: *whenever a component fails safe,
+something else has to be able to observe that it is failing.* I wrote that
+sentence and then read past its violation.
+
+**How close this came to being much worse.** The next planned step was flipping
+`EXECUTOR_ENFORCES_VERDICT` on. With the lookup broken, "no verdict found"
+correctly means refuse -- so enforcement would have blocked **every single
+deploy**, immediately, and the cause would have been a key name three files
+away from the switch.
+
+**Fix.** CodePipeline exposes the value as the built-in variable
+`#{codepipeline.PipelineExecutionId}`. It is now interpolated into
+UserParameters on both the Gate and Deploy actions, the same mechanism already
+proven by `#{SourceVariables.CommitId}`, and both handlers read it from there
+(keeping the old path as a harmless fallback). `MAX_B64_LENGTH` dropped 860 to
+780 to keep UserParameters under its 1000-character cap.
+
+**The guard: `tests/test_pipeline_wiring.py`.** No test can know the real shape
+of a third-party event. What a test *can* do is assert that both halves of a
+contract name the same field -- the pipeline definition writes
+`pipeline_execution_id`, the handlers read `pipeline_execution_id` -- because
+both sides live in this repository. Verified to fail when the fix is removed,
+because a guard that cannot fail is decoration.
+
+**Three lessons, ascending:**
+
+1. Read the actual event. One `logger.info(json.dumps(event))` on the first real
+   run would have shown `pipelineContext` was absent.
+2. A fixture is a claim about the world and deserves the same scepticism as the
+   code. Where a fixture encodes an integration boundary, something has to check
+   it against reality -- a real run, or a contract test.
+3. **Look at the data.** F-022 and F-023 were both found by scanning a DynamoDB
+   table for the first time, in the same five minutes. Two phases of confident,
+   tested, reviewed, non-functional work, and the entire cost of finding them was
+   `aws dynamodb scan`.

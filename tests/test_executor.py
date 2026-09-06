@@ -235,10 +235,37 @@ def shadow(monkeypatch):
 
 
 def verdict_job(execution_id: str = "exec-1", job_id: str = "job-1") -> dict:
+    """A job event shaped the way CodePipeline ACTUALLY sends one.
+
+    THIS FIXTURE WAS THE BUG (F-023).
+
+    It used to be `{"data": {"pipelineContext": {"pipelineExecutionId": ...}}}`,
+    which is the custom-action job structure returned by `PollForJobs` and is
+    NOT what a Lambda-invoke action receives. A Lambda invoke gets
+    `actionConfiguration`, `inputArtifacts`, `outputArtifacts`,
+    `artifactCredentials` and `continuationToken` -- and no pipelineContext at
+    all.
+
+    So the fixture and the code under test were wrong in the same way, and
+    agreed. Every test passed. In production the lookup returned None on every
+    single run, the risk branching added in 5.1 never once executed, and the
+    log line read `VERDICT SHADOW: would have STOPPED this deploy -- job carries
+    no pipelineExecutionId`, which looks like shadow mode working.
+
+    A test written from an event shape you invented validates your assumption,
+    not the integration. `test_pipeline_wiring.py` is what actually closes this:
+    it asserts the pipeline puts the value where this code now reads it.
+    """
     return {
         "CodePipeline.job": {
             "id": job_id,
-            "data": {"pipelineContext": {"pipelineExecutionId": execution_id}},
+            "data": {
+                "actionConfiguration": {
+                    "configuration": {
+                        "UserParameters": json.dumps({"pipeline_execution_id": execution_id}),
+                    }
+                },
+            },
         }
     }
 
