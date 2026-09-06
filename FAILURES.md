@@ -1587,3 +1587,74 @@ because a guard that cannot fail is decoration.
    table for the first time, in the same five minutes. Two phases of confident,
    tested, reviewed, non-functional work, and the entire cost of finding them was
    `aws dynamodb scan`.
+
+---
+
+## F-024 — The crafted commits could not survive the pipeline they exist to exercise
+
+**Symptom.** `python scripts/craft_commit.py create revert --push` failed the
+**Build** stage with ~180 instances of:
+
+```
+F841 Local variable `synthetic_value_0` is assigned to but never used
+  --> demo/synthetic/payments/retry.py:10:5
+```
+
+The Gate stage never ran. No verdict was produced.
+
+**Cause.** `_lines()` wrote its filler as unused local variables inside a
+function:
+
+```python
+def synthetic() -> None:
+    synthetic_value_0 = 0  # generated
+    synthetic_value_1 = 1  # generated
+```
+
+`buildspec.yml` runs `ruff check .` as its first build command, and F841 is a
+real rule this project selects on purpose. So the generator produced code the
+repository's own CI rejects.
+
+**Which recipes this disabled: four of six.** `safe-bump` (one line) and
+`docs-only` (Markdown) generate no Python and passed. `revert`,
+`payments-friday`, `huge-refactor` and `injection` -- every recipe that produces
+a *medium* or *high* verdict, which is to say every interesting one -- could
+never reach the gate.
+
+**Why it went unnoticed for two phases.** `create <recipe>` had only ever been
+run locally, where it writes files, commits them, and nothing lints the result.
+The runbook documented `--push` and nobody had pushed. The two recipes exercised
+first were, by coincidence, the only two that generate no Python.
+
+**Fix.** Module-level constants instead of function locals:
+
+```python
+SYNTHETIC_VALUE_0 = 0  # generated
+```
+
+F841 is scoped to locals; a module-level assignment is a constant nobody
+imports, which ruff has no opinion about. Identical line count, identical diff
+statistics, identical paths -- and it survives CI.
+
+**Guard: `tests/test_craft_commit_lints.py`.** Generates every recipe's content
+into a temp directory and runs the two commands `buildspec.yml` runs, per
+recipe. It also asserts there *are* recipes and that at least one produces
+Python, because a parametrised test over an empty list passes forever.
+
+**The pattern, third time in two days.** F-023 was two increments keyed on a
+field AWS never sends. F-022 was a metric computed and never persisted. This is
+a generator whose output was never once put through the system it feeds. All
+three share a shape:
+
+> The component was tested. The **seam** was not.
+
+Each was found the same way -- by running the thing end to end for real, rather
+than by adding another unit test to a suite that was already green. And each is
+now guarded by a cheap test that stands at the seam rather than inside either
+component.
+
+**One uncomfortable observation for the talk.** This project's failures log now
+contains three consecutive entries where the code was correct, the tests passed,
+and the integration had never been executed. That ratio is the actual lesson: on
+a system assembled from managed services, the defects cluster almost entirely at
+the boundaries, and unit tests are structurally incapable of finding them.

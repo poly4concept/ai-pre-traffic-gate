@@ -182,16 +182,24 @@ def test_every_recipe_produces_a_real_diff(recipe):
 
 
 def test_line_generation_produces_roughly_the_requested_size():
-    """The diff statistics are the signal, so the counts have to be real."""
+    """The diff statistics are the signal, so the counts have to be real.
+
+    Counts generated LINES rather than occurrences of a particular identifier.
+    The old version asserted on the literal `synthetic_value_`, which made it
+    fail when F-024 renamed the filler to module-level `SYNTHETIC_VALUE_`
+    constants -- a rename that changed nothing about the diff size this test
+    exists to protect. An assertion coupled to a name rather than to the
+    property is a test that objects to refactoring.
+    """
     body = cc._lines("payments/settlement.py", 200)
 
-    assert body.count("synthetic_value_") == 200
+    assert len([line for line in body.splitlines() if line.endswith("# generated")]) == 200
 
 
 def test_markdown_files_get_markdown_content():
     """`docs-only` tests size-vs-risk, which needs the paths to look inert."""
     assert cc._lines("docs/x.md", 5).lstrip().startswith("#")
-    assert "synthetic_value_" not in cc._lines("docs/x.md", 5)
+    assert "# generated" not in cc._lines("docs/x.md", 5)
 
 
 def test_the_small_change_is_actually_small():
