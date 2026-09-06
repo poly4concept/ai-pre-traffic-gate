@@ -2345,3 +2345,74 @@ precisely the number that decides whether this gate is trusted or worked around.
 
 An override is not a reason to stop measuring. It is one of the more interesting
 things to measure.
+
+---
+
+## D-076 — The mode governs whether anything refuses, not just the gate
+
+**Decision:** the executor refuses a `high` verdict only when the verdict record
+says the gate was in a blocking mode. In `shadow` and `advisory` it ships via
+canary and logs what it would have refused.
+
+**What this replaces, and it was a design error I made in 5.1.** The executor
+refused a `high` verdict whenever `EXECUTOR_ENFORCES_VERDICT` was true,
+regardless of mode. So the documented rollout stage `advisory` -- whose entire
+definition is that nothing is blocked -- blocked deploys.
+
+Mubarak set advisory, watched a deploy get stopped, and asked why. That question
+is the finding: **a rollout stage that does not mean what it says is worse than
+not having one**, because its whole purpose is to be the step where you can be
+wrong cheaply.
+
+**The tangle, and it is worth naming because it is easy to repeat.** One switch
+controlled two behaviours with completely different risk profiles:
+
+| behaviour | what it changes | safe in advisory? |
+| --- | --- | --- |
+| `low` -> all at once, `medium` -> canary | **how** you deploy | yes |
+| `high` -> refuse | **whether** you deploy | no |
+
+Turning on routing silently turned on enforcement. The switch's name --
+`EXECUTOR_ENFORCES_VERDICT` -- described the second and was used for both.
+
+**Now:** the boolean says whether this component participates at all; the
+**mode** says whether anything may refuse. Two dials, two clearly different
+questions, and `advisory` means what it says everywhere in the system.
+
+**Why the mode is read from the VERDICT RECORD rather than the executor's own
+environment.** The record's mode is the one that was in force when the judgement
+was made. An env var would let the two components disagree about the same
+deploy -- a gate that judged in advisory and an executor that refused in
+enforcing -- with nothing to say which was authoritative. The record carries its
+own governance, which also means a verdict replayed months later is interpreted
+under the rules it was made under.
+
+**What a `high` verdict does in a non-blocking mode:** canary. Flagged, not
+blocked. It is the slowest safe rollout available, which is the proportionate
+answer to "the model is worried and nothing is permitted to stop me", and the
+log line says explicitly that enforcing would have refused.
+
+**The counter-argument, which I considered and rejected.** The executor's
+refusal could be framed as an independent deterministic safety net -- defence in
+depth, unaffected by the gate's posture. That argument proves too much: by it
+you would never have an advisory stage at all. And the refusal is driven by the
+model's verdict, so it is not independent of the gate in any meaningful sense.
+If you want the executor as a hard net, that is `enforcing`.
+
+**One implementation detail that is the actual safety property.** The relaxation
+tests membership in a positive set:
+
+```python
+NON_BLOCKING_MODES = frozenset({"shadow", "advisory"})
+if risk_level == "high" and mode in NON_BLOCKING_MODES:
+```
+
+not `mode not in BLOCKING_MODES`. The negation is true for `""`, for `"advisroy"`,
+and for anything a corrupted record contains -- so every unknown value would
+become permission to ship a high-risk change. My own new test caught this: I
+wrote the negation first, and `test_an_unrecognised_mode_refuses` failed.
+
+Third occurrence of the same rule in this project, after `action_for` and
+`deployment_config_for`: **check what you allow, never what you forbid.** The
+two forms are logically equivalent only when you know the whole domain, and the
+whole point of these guards is the cases where you do not.

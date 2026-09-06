@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -80,6 +81,65 @@ def caller_arn(session) -> str:
         raise SystemExit(1) from exc
 
 
+EXECUTION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def resolve_execution_id(session, given: str) -> str:
+    """Turn whatever was pasted into a full pipeline execution ID.
+
+    THE PAPER CUT THIS EXISTS FOR, and it cost a real attempt.
+
+    The CodePipeline console displays execution IDs TRUNCATED to the first
+    segment -- `474d61f3` rather than
+    `474d61f3-5b26-4ee2-b241-2ac4a71dd69f`. Copying what is on screen is the
+    obvious thing to do, and it produced two silent-ish failures at once: the
+    override row was written under a key matching no execution, and
+    `retry_stage_execution` rejected the short form with a bare
+    `ValidationException` that names nothing.
+
+    So a short value is treated as a PREFIX and resolved against recent
+    executions rather than rejected. Refusing outright would have been correct
+    and unhelpful; the information needed to fix it is one API call away.
+
+    Ambiguity is an error, never a guess. Two executions sharing a prefix is
+    vanishingly unlikely and picking one would be choosing which deploy to
+    unblock on the user's behalf.
+    """
+    if EXECUTION_ID.match(given):
+        return given
+
+    print(f"  {given!r} is not a full execution ID; resolving it as a prefix...")
+    pipeline = session.client("codepipeline")
+    try:
+        page = pipeline.list_pipeline_executions(pipelineName=PIPELINE, maxResults=100)
+    except ClientError as exc:
+        print(_c(f"could not list pipeline executions: {exc.response['Error']['Code']}", "red"))
+        raise SystemExit(1) from exc
+
+    matches = [
+        summary["pipelineExecutionId"]
+        for summary in page.get("pipelineExecutionSummaries", [])
+        if summary["pipelineExecutionId"].startswith(given)
+    ]
+
+    if not matches:
+        print(_c(f"no recent pipeline execution starts with {given!r}.", "red"))
+        print("  The console truncates these -- copy the full ID from the execution's")
+        print("  detail page, or run:  aws codepipeline list-pipeline-executions \\")
+        print(f"    --pipeline-name {PIPELINE}")
+        raise SystemExit(1)
+
+    if len(matches) > 1:
+        print(_c(f"{given!r} matches {len(matches)} executions:", "red"))
+        for match in matches:
+            print(f"    {match}")
+        print("  Use the full ID.")
+        raise SystemExit(1)
+
+    print(_c(f"  resolved to {matches[0]}", "dim"))
+    return matches[0]
+
+
 def create(session, args) -> int:
     if not args.reason.strip():
         # Mandatory because this row is the only explanation the audit trail
@@ -89,6 +149,7 @@ def create(session, args) -> int:
         print(_c("--reason is required and must not be blank.", "red"))
         return 1
 
+    args.execution_id = resolve_execution_id(session, args.execution_id)
     actor = caller_arn(session)
     now = datetime.now(UTC)
     expires = now + timedelta(minutes=args.ttl_minutes)
@@ -168,6 +229,7 @@ def retry_stage(session, execution_id: str) -> int:
 
 
 def show(session, args) -> int:
+    args.execution_id = resolve_execution_id(session, args.execution_id)
     ddb = session.client("dynamodb")
     response = ddb.get_item(
         TableName=TABLE,
@@ -202,6 +264,7 @@ def show(session, args) -> int:
 
 
 def revoke(session, args) -> int:
+    args.execution_id = resolve_execution_id(session, args.execution_id)
     ddb = session.client("dynamodb")
     ddb.delete_item(
         TableName=TABLE,
@@ -256,7 +319,7 @@ def main() -> int:
 
     p = sub.add_parser("retry", help="retry the Gate stage for an execution")
     p.add_argument("execution_id")
-    p.set_defaults(func=lambda s, a: retry_stage(s, a.execution_id))
+    p.set_defaults(func=lambda s, a: retry_stage(s, resolve_execution_id(s, a.execution_id)))
 
     p = sub.add_parser("show", help="show the override for an execution")
     p.add_argument("execution_id")

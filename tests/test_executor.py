@@ -726,3 +726,95 @@ def test_shadow_mode_reports_the_override_it_would_have_honoured(shadow, monkeyp
 
     assert config is None
     assert "OVERRIDDEN to allow" in note
+
+
+# --- The mode governs whether anything refuses -----------------------------
+#
+# Phase 5.4, D-076. The executor used to refuse a `high` verdict regardless of
+# mode, which made `advisory` a lie: the gate did not block, the executor did,
+# and a deploy was stopped in the one mode whose definition is that nothing
+# stops. Mubarak set advisory, got blocked, and asked why -- which is exactly
+# how you find out a rollout stage does not mean what it says.
+
+
+def record_with_mode(risk: str, mode: str) -> dict:
+    item = record(risk)
+    item["mode"] = {"S": mode}
+    return item
+
+
+@pytest.mark.parametrize("mode", ["shadow", "advisory"])
+def test_a_high_risk_verdict_canaries_rather_than_refusing_in_a_non_blocking_mode(
+    enforcing, monkeypatch, mode
+):
+    """THE FIX. Flagged, not blocked.
+
+    The canary is the slowest safe rollout available, which is the
+    proportionate response to "the model is worried and nothing may stop me".
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_mode("high", mode)))
+
+    config, note = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config == CANARY
+    assert "nothing blocks" in note
+
+
+def test_a_high_risk_verdict_still_refuses_in_enforcing(enforcing, monkeypatch):
+    """The behaviour that must survive the fix. Enforcing still enforces."""
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_mode("high", "enforcing")))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="HIGH risk"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+def test_an_unreadable_mode_refuses_rather_than_relaxing(enforcing, monkeypatch):
+    """`mode and mode not in BLOCKING_MODES` -- the `mode and` is load-bearing.
+
+    A record with no mode is corrupted, not old: the field has been written on
+    every verdict since Phase 1. "The mode is advisory" and "I could not read
+    the mode" are different facts and only one is permission to relax. Without
+    the truthiness check, a corrupted record would ship a high-risk change.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_mode("high", "")))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="HIGH risk"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+def test_an_unrecognised_mode_refuses(enforcing, monkeypatch):
+    """A mode nobody has heard of is not a licence to ship. Same rule as the
+    gate, which turns an unrecognised GATE_MODE into `enforcing`."""
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_mode("high", "whatever")))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="HIGH risk"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+@pytest.mark.parametrize(("risk", "expected"), [("low", "CodeDeployDefault.LambdaAllAtOnce")])
+def test_routing_still_applies_in_advisory(enforcing, monkeypatch, risk, expected):
+    """Routing is harmless in any mode and must keep working.
+
+    Separating routing from blocking is the whole point of D-076: a `low`
+    verdict should still get the fast path in advisory.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_mode(risk, "advisory")))
+
+    config, _ = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config == expected
+
+
+def test_an_override_to_halt_beats_a_non_blocking_mode(enforcing, monkeypatch):
+    """A human halt is not the model acting, so the mode does not soften it.
+
+    Same reasoning as the gate, where a human override is deliberately exempt
+    from MODEL_VERDICT_CAN_ACT: losing the kill switch during a cautious
+    rollout would be the wrong kind of caution.
+    """
+    item = record_with_override("low", "halt")
+    item["mode"] = {"S": "advisory"}
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=item))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="overrode this deploy to HALT"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])

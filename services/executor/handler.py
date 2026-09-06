@@ -108,6 +108,30 @@ DEPLOYMENT_CONFIG_FOR_RISK = {
     "medium": os.environ.get("CANARY_CONFIG", ""),
 }
 
+# Modes in which ANYTHING is allowed to refuse a deploy. Deliberately the same
+# set as the gate's, and read from the VERDICT RECORD rather than from this
+# function's own environment (D-076).
+#
+# Why the record and not an env var: the mode stored on the verdict is the one
+# that was in force when the judgement was made. Reading it from here would let
+# the two components disagree -- a gate that judged in advisory and an executor
+# that refused in enforcing, for the same deploy, with nothing to say which was
+# authoritative.
+BLOCKING_MODES = frozenset({"enforcing"})
+
+# The modes in which a high-risk verdict is flagged rather than refused.
+#
+# Written as a POSITIVE set rather than as `not in BLOCKING_MODES`, and the
+# distinction is the whole safety property. A negation treats every unknown
+# value as permission: `mode not in {"enforcing"}` is true for "advisroy",
+# for "", and for anything a corrupted record happens to contain. Membership
+# in a known set is true only for a mode somebody deliberately named.
+#
+# Third time this project has needed the same rule -- `action_for`,
+# `deployment_config_for`, and now this. Check what you allow, never what you
+# forbid.
+NON_BLOCKING_MODES = frozenset({"shadow", "advisory"})
+
 # A GSI read is ALWAYS eventually consistent -- DynamoDB offers no strongly
 # consistent read on a global secondary index, so this is a property of the
 # lookup and not a setting we declined to switch on.
@@ -345,10 +369,45 @@ def deployment_config_for(risk_level: str) -> str:
     raise VerdictUnavailable(f"risk level {risk_level!r} has no deployment config")
 
 
-def config_for(risk_level: str, override: str = "") -> str:
-    """Which config to deploy with, once a human override is taken into account.
+def read_mode(record: dict[str, Any]) -> str:
+    """The gate mode that was in force when this verdict was made.
 
-    Three rules, and the middle one is the interesting decision:
+    An empty string means the field was absent or unreadable, and the caller
+    treats that as BLOCKING -- the same direction as everything else here.
+
+    `mode` has been written on every verdict since Phase 1, so its absence is a
+    corrupted record rather than an old one. The relaxation in `config_for`
+    therefore requires POSITIVE evidence that the mode does not block: we stop
+    refusing high-risk deploys only when the record actually says `shadow` or
+    `advisory`, never merely because we failed to find out.
+
+    That is the same shape as the whole signals package. "The mode is advisory"
+    and "I could not read the mode" are different facts, and only one of them
+    is permission to relax.
+    """
+    return record.get("mode", {}).get("S", "").strip().lower()
+
+
+def config_for(risk_level: str, override: str = "", mode: str = "") -> str:
+    """Which config to deploy with, once the override and the mode are applied.
+
+    THE MODE GOVERNS WHETHER ANYTHING REFUSES (D-076).
+
+    This function used to refuse a `high` verdict regardless of mode, which made
+    `advisory` a lie: the gate did not block, the executor did, and the deploy
+    was stopped in a mode whose entire definition is that nothing is stopped.
+
+    Two behaviours were tangled in one switch:
+
+        routing    low -> all at once, medium -> canary   harmless in any mode
+        blocking   high -> refuse                         is enforcement
+
+    Turning on routing silently turned on enforcement. Now `high` refuses only
+    in a blocking mode; in shadow and advisory it canaries and says loudly what
+    it would have done -- which is what makes the advisory period a real
+    rehearsal rather than a differently-worded enforcement.
+
+    The remaining rules, and the middle one is the interesting decision:
 
       halt      refuse, whatever the model said. A human stopping a deploy the
                 model was happy with is the case the override path exists for
@@ -385,6 +444,26 @@ def config_for(risk_level: str, override: str = "") -> str:
                 "configured to ship it gradually with"
             )
         return canary
+
+    # Membership in NON_BLOCKING_MODES, not absence from BLOCKING_MODES. An
+    # absent, misspelled or corrupted mode is not evidence that nothing blocks.
+    if risk_level == "high" and mode in NON_BLOCKING_MODES:
+        # Flagged, not blocked. The canary is the slowest safe rollout this
+        # project has, which is the proportionate response to "the model is
+        # worried and nothing is allowed to stop me".
+        canary = DEPLOYMENT_CONFIG_FOR_RISK.get("medium")
+        if not canary:
+            raise VerdictUnavailable(
+                f"verdict is HIGH risk and mode {mode!r} does not block, but no "
+                "canary config is configured to ship it cautiously with"
+            )
+        logger.warning(
+            "VERDICT: HIGH risk, but mode is %r which does not block. Shipping "
+            "via canary. In `enforcing` this deploy would have been REFUSED.",
+            mode or "unknown",
+        )
+        return canary
+
     return deployment_config_for(risk_level)
 
 
@@ -409,7 +488,8 @@ def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
         record = find_verdict(execution_id)
         risk_level = read_risk_level(record)
         override, override_reason = read_override(record)
-        config = config_for(risk_level, override)
+        mode = read_mode(record)
+        config = config_for(risk_level, override, mode)
     except VerdictUnavailable as exc:
         if EXECUTOR_ENFORCES_VERDICT:
             raise
@@ -427,6 +507,8 @@ def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
     # that only happened because a human insisted is the single most important
     # thing to be able to find afterwards.
     overridden = f", OVERRIDDEN to {override} ({override_reason})" if override else ""
+    if mode in NON_BLOCKING_MODES:
+        overridden += f", mode={mode} (nothing blocks)"
 
     if EXECUTOR_ENFORCES_VERDICT:
         logger.info("Verdict is %s%s; deploying with %s", risk_level, overridden, config)
