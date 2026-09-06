@@ -1531,8 +1531,12 @@ two increments of work:
 
 ```python
 def verdict_job(execution_id="exec-1", job_id="job-1"):
-    return {"CodePipeline.job": {"id": job_id,
-            "data": {"pipelineContext": {"pipelineExecutionId": execution_id}}}}
+    return {
+        "CodePipeline.job": {
+            "id": job_id,
+            "data": {"pipelineContext": {"pipelineExecutionId": execution_id}},
+        }
+    }
 ```
 
 I wrote that fixture from the same wrong assumption as the code. **The fixture
