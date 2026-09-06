@@ -1658,3 +1658,90 @@ contains three consecutive entries where the code was correct, the tests passed,
 and the integration had never been executed. That ratio is the actual lesson: on
 a system assembled from managed services, the defects cluster almost entirely at
 the boundaries, and unit tests are structurally incapable of finding them.
+
+---
+
+## F-025 — The override path worked in exactly one configuration, and not the one we shipped
+
+**Found by a question, not by a test.** Mubarak's first enforced block came from
+the *executor*, not the gate, and he asked: if the person receiving that email
+wants to override, where does the execution ID come from?
+
+Two things were wrong, and the second one is serious.
+
+### The email omitted the instructions in exactly this case
+
+`build_body` gated the override block on `action == "halt_pipeline"` -- that is,
+on the GATE being the blocker. In advisory mode the gate does not block; the
+executor refuses a high-risk verdict instead. So the email arrived, correctly
+said *"a later stage may still refuse it"*, that stage did refuse it, and the
+reader was left with no execution ID and no command.
+
+The instructions were missing from precisely the configuration this project
+tells people to roll out through. Now the condition is the verdict (`decision ==
+halt`) rather than who acted on it, and the block names which stage stopped it.
+
+### The executor never read the override at all
+
+Worse. `read_risk_level` reads `verdict.risk_level`, which is the MODEL's
+verdict -- and a human override deliberately does not change it. The audit
+record keeps them as separate fields on purpose, because "a human overrode a
+high-risk verdict" and "the model said low" are different events and flattening
+them would destroy the audit trail (D-062's argument, applied to storage).
+
+Nobody traced the consequence. The executor read only the risk level, so:
+
+1. A human writes an override to `allow`.
+2. They retry the Gate stage.
+3. The gate re-runs, honours the override, records `decision: allow`.
+4. The Deploy stage runs. The executor reads `risk_level: high` -- unchanged,
+   correctly -- and **refuses again**.
+
+The whole of Phase 5.3 functioned only when the gate was the blocker. In
+advisory mode, where the executor is the blocker, an override could not unblock
+anything. There was no error, no warning, and a retry that looked like it should
+have worked.
+
+**And there was a comment asserting otherwise.** `find_verdict`'s docstring:
+
+> the executor reads the FULL record including any human override
+
+It fetched the full record and then never looked at the override. A comment
+describing an intention rather than the behaviour -- which is F-022 exactly, in
+the same codebase, three days later.
+
+### The fix
+
+`read_override` plus `config_for(risk_level, override)`:
+
+| override | result |
+| --- | --- |
+| `halt` | refuse, whatever the model said |
+| `allow` | **canary** -- even for `high` |
+| absent / unrecognised | the risk level decides, as before |
+
+`allow` maps to canary rather than a full deploy, and the reasoning belongs on a
+slide: **an override says "I accept this risk", not "I am certain there is
+none."** The model flagged something and a human chose to proceed anyway.
+Shifting 10% of traffic for a minute still catches it if the model was right and
+costs a minute if it was wrong. Going straight to a full deploy would treat a
+human's willingness to proceed as *evidence about the change*, which it is not.
+
+That is also the only path by which a `high` verdict ever ships, and the
+asymmetry is deliberate: it costs a named person, a written reason, and admin
+credentials.
+
+### The lesson
+
+The failures log now has four consecutive entries where two components each
+worked and the seam between them did not. This one adds a wrinkle: the seam was
+**documented as working**. Both F-022 and F-025 were found by reading a comment
+that turned out to be a wish.
+
+> A comment is a claim about behaviour that nothing verifies. On an integration
+> boundary, that makes it worse than silence -- it stops the next person
+> checking.
+
+Nine tests now cover the override path through the executor, including the two
+directions (`allow` shipping a `high`, `halt` stopping a `low`) and the refusal
+to guess at an unrecognised value.

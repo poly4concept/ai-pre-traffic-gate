@@ -292,6 +292,36 @@ def read_risk_level(record: dict[str, Any]) -> str:
     return level.strip().lower()
 
 
+def read_override(record: dict[str, Any]) -> tuple[str, str]:
+    """(decision, reason) from a human override, or ("", "") if nobody intervened.
+
+    THE GAP THIS CLOSES, AND IT MADE PHASE 5.3 NON-FUNCTIONAL (F-025).
+
+    `read_risk_level` reads the MODEL's verdict, and a human override does not
+    change it -- the audit record deliberately keeps `verdict.risk_level` as
+    what the model said and records the override as a separate field, because
+    "a human overrode a high-risk verdict" and "the model said low" are
+    different events and flattening them would destroy the audit trail.
+
+    The consequence nobody traced: the executor read only `verdict.risk_level`,
+    so an override could never reach it. In advisory mode -- where the gate does
+    not block and the EXECUTOR is the thing that refuses -- writing an override
+    and retrying the Gate stage produced a fresh verdict record saying
+    `decision: allow`, and the executor refused it again on the unchanged
+    `risk_level: high`. The override path worked only in the one configuration
+    where the gate was the blocker.
+
+    Worse, `find_verdict`'s docstring claimed this function's caller "reads the
+    FULL record including any human override". It fetched the override and then
+    never looked at it -- a comment describing an intention rather than the
+    behaviour, which is exactly F-022 again.
+    """
+    override = record.get("override", {}).get("M", {})
+    decision = override.get("decision", {}).get("S", "").strip().lower()
+    reason = override.get("reason", {}).get("S", "")
+    return decision, reason
+
+
 def deployment_config_for(risk_level: str) -> str:
     """Which CodeDeploy config a risk level selects.
 
@@ -315,6 +345,49 @@ def deployment_config_for(risk_level: str) -> str:
     raise VerdictUnavailable(f"risk level {risk_level!r} has no deployment config")
 
 
+def config_for(risk_level: str, override: str = "") -> str:
+    """Which config to deploy with, once a human override is taken into account.
+
+    Three rules, and the middle one is the interesting decision:
+
+      halt      refuse, whatever the model said. A human stopping a deploy the
+                model was happy with is the case the override path exists for
+                just as much as the reverse, and it must not be defeatable by a
+                `low` verdict.
+
+      allow     CANARY, not a full deploy -- even for a verdict of `high`.
+
+                An override says "I accept this risk", not "I am certain this is
+                fine". The model flagged something; a human decided to ship
+                anyway; shifting 10% of traffic for a minute still catches it if
+                the model was right, and costs a minute if it was wrong. Going
+                straight to a full deploy would treat a human's willingness to
+                proceed as evidence about the change, which it is not.
+
+                This is also the only path by which a `high` verdict ever
+                deploys, and that asymmetry is deliberate: it takes a named
+                person, a written reason, and admin credentials.
+
+      no override   the risk level decides, exactly as before.
+    """
+    if override == "halt":
+        raise VerdictUnavailable(
+            "a human overrode this deploy to HALT, which stands regardless of "
+            f"the model's {risk_level!r} verdict"
+        )
+    if override == "allow":
+        canary = DEPLOYMENT_CONFIG_FOR_RISK.get("medium")
+        if not canary:
+            # Same rule as everywhere else here: no default. If the canary
+            # config is unset there is no safe way to honour an override.
+            raise VerdictUnavailable(
+                "a human overrode this deploy to ALLOW, but no canary config is "
+                "configured to ship it gradually with"
+            )
+        return canary
+    return deployment_config_for(risk_level)
+
+
 def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
     """(config to use, human-readable note). Never raises.
 
@@ -335,7 +408,8 @@ def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
             raise VerdictUnavailable("job carries no pipelineExecutionId")
         record = find_verdict(execution_id)
         risk_level = read_risk_level(record)
-        config = deployment_config_for(risk_level)
+        override, override_reason = read_override(record)
+        config = config_for(risk_level, override)
     except VerdictUnavailable as exc:
         if EXECUTOR_ENFORCES_VERDICT:
             raise
@@ -349,12 +423,19 @@ def resolve_deployment_config(job: dict[str, Any]) -> tuple[str | None, str]:
         logger.warning("VERDICT SHADOW: would have STOPPED this deploy -- %s", code)
         return None, f"shadow: would have stopped (verdict store {code})"
 
-    if EXECUTOR_ENFORCES_VERDICT:
-        logger.info("Verdict is %s; deploying with %s", risk_level, config)
-        return config, f"{risk_level} risk -> {config}"
+    # Named in the log line and in the pipeline's job result, because a deploy
+    # that only happened because a human insisted is the single most important
+    # thing to be able to find afterwards.
+    overridden = f", OVERRIDDEN to {override} ({override_reason})" if override else ""
 
-    logger.info("VERDICT SHADOW: verdict is %s; would have used %s", risk_level, config)
-    return None, f"shadow: {risk_level} risk would have used {config}"
+    if EXECUTOR_ENFORCES_VERDICT:
+        logger.info("Verdict is %s%s; deploying with %s", risk_level, overridden, config)
+        return config, f"{risk_level} risk{overridden} -> {config}"
+
+    logger.info(
+        "VERDICT SHADOW: verdict is %s%s; would have used %s", risk_level, overridden, config
+    )
+    return None, f"shadow: {risk_level} risk{overridden} would have used {config}"
 
 
 def fetch_artifact(data: dict[str, Any]) -> bytes:

@@ -605,3 +605,124 @@ def test_an_unconfigured_verdict_table_stops_the_deploy_when_enforcing(monkeypat
 
     with pytest.raises(module.VerdictUnavailable):
         module.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+# --- Human overrides reach the executor ------------------------------------
+#
+# Phase 5.4. Until F-025 they did not. `read_risk_level` reads the MODEL's
+# verdict, which an override deliberately does not change -- the audit record
+# keeps them as separate fields so "a human overrode a high-risk verdict" and
+# "the model said low" stay distinguishable. Nobody traced the consequence: the
+# executor read only the risk level, so an override could never reach it.
+#
+# That made the whole of Phase 5.3 work in exactly one configuration -- gate
+# enforcing -- and silently do nothing in the one this project tells people to
+# roll out through, where the gate is advisory and the EXECUTOR is the blocker.
+
+
+def record_with_override(risk: str, decision: str, reason: str = "urgent fix") -> dict:
+    item = record(risk)
+    item["override"] = {"M": {"decision": {"S": decision}, "reason": {"S": reason}}}
+    return item
+
+
+def test_an_override_to_allow_ships_a_high_risk_change(enforcing, monkeypatch):
+    """THE CASE THAT WAS BROKEN.
+
+    A human said ship it. Without this the executor refused anyway, on a risk
+    level the override was never going to change.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_override("high", "allow")))
+
+    config, note = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config == CANARY
+    assert "OVERRIDDEN to allow" in note
+
+
+def test_an_override_to_allow_ships_via_canary_not_all_at_once(enforcing, monkeypatch):
+    """An override says "I accept this risk", not "I am certain there is none".
+
+    The model flagged something and a human chose to proceed. Shifting 10% for a
+    minute still catches it if the model was right, and costs a minute if it was
+    wrong. Treating a human's willingness to proceed as EVIDENCE about the
+    change would be the wrong reading of an override.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_override("high", "allow")))
+
+    config, _ = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config == CANARY
+    assert config != "CodeDeployDefault.LambdaAllAtOnce"
+
+
+def test_an_override_to_halt_stops_a_low_risk_change(enforcing, monkeypatch):
+    """The reverse direction, and it matters as much.
+
+    A human stopping a deploy the model was happy with is exactly what the
+    override path is for during an incident. A `low` verdict must not defeat it.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_override("low", "halt")))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="overrode this deploy to HALT"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+def test_the_override_reason_reaches_the_pipeline_job_result(enforcing, monkeypatch):
+    """A deploy that only happened because somebody insisted is the single most
+    important thing to be able to find afterwards."""
+    wire_dynamo(
+        enforcing,
+        monkeypatch,
+        FakeDynamo(item=record_with_override("high", "allow", "known flaky alarm")),
+    )
+
+    _, note = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert "known flaky alarm" in note
+
+
+def test_no_override_leaves_the_risk_mapping_alone(enforcing, monkeypatch):
+    """The override path must not change the ordinary case."""
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record("medium")))
+
+    config, note = enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config == CANARY
+    assert "OVERRIDDEN" not in note
+
+
+def test_an_empty_override_map_is_not_an_override(enforcing, monkeypatch):
+    """`build_record` writes `"override": {}` when nobody intervened, so the
+    field is always present and its EMPTINESS is what means "no override"."""
+    item = record("high")
+    item["override"] = {"M": {}}
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=item))
+
+    with pytest.raises(enforcing.VerdictUnavailable, match="HIGH risk"):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+def test_an_unrecognised_override_value_does_not_ship_anything(enforcing, monkeypatch):
+    """Same rule as everywhere else: no default.
+
+    A decision that is neither `allow` nor `halt` is a corrupted or
+    hand-edited row, and guessing which way its author meant it is the one
+    thing that must not happen here. It falls through to the risk level, which
+    for `high` refuses.
+    """
+    wire_dynamo(enforcing, monkeypatch, FakeDynamo(item=record_with_override("high", "maybe")))
+
+    with pytest.raises(enforcing.VerdictUnavailable):
+        enforcing.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+
+def test_shadow_mode_reports_the_override_it_would_have_honoured(shadow, monkeypatch):
+    """Shadow has to show the decision the enforcing version WOULD make,
+    overrides included, or the log line is not a rehearsal."""
+    wire_dynamo(shadow, monkeypatch, FakeDynamo(item=record_with_override("high", "allow")))
+
+    config, note = shadow.resolve_deployment_config(verdict_job()["CodePipeline.job"])
+
+    assert config is None
+    assert "OVERRIDDEN to allow" in note

@@ -261,16 +261,38 @@ def build_body(gate: dict[str, Any], bundle: Any, service: str) -> str:
     # Phase 5.3. An escalation that describes a problem and not the remedy makes
     # the reader go and find the runbook, at the worst possible moment. The
     # execution ID is right here, so the exact command can be too.
+    #
+    # NOT gated on `action == "halt_pipeline"`, and that was the bug (F-025).
+    # It used to be, which meant the command appeared only when the GATE was the
+    # blocker. In advisory mode the gate does not block and the EXECUTOR refuses
+    # a high-risk verdict instead -- so the email arrived, said a later stage
+    # might refuse it, that stage did, and the reader had no execution ID and no
+    # command. The instructions were missing from precisely the configuration
+    # this project tells people to roll out through.
+    #
+    # The condition is now the verdict, not who acted on it: if this deploy is
+    # blocked anywhere, here is how to unblock it.
     execution_id = gate.get("pipeline_execution_id")
-    if execution_id and action == "halt_pipeline":
+    if execution_id and gate.get("decision") == "halt":
+        blocker = (
+            "The gate stopped this deploy."
+            if action == "halt_pipeline"
+            else "The gate did not stop this deploy, but the deploy stage refuses\n"
+            "  a high-risk verdict."
+        )
         lines += [
             "",
             "TO OVERRIDE THIS ONE DEPLOY",
+            f"  {blocker}",
             "  Needs admin credentials. Applies to THIS execution only and",
             "  expires in 60 minutes -- it cannot leave the gate switched off.",
             "",
             f"    python scripts/override.py allow {execution_id} \\",
             '        --reason "why you are shipping it anyway" --retry',
+            "",
+            "  Honoured by BOTH the gate and the deploy stage, and ships via",
+            "  canary rather than all at once -- accepting a risk is not the",
+            "  same as being certain there is none.",
         ]
 
     return _clip("\n".join(lines), MAX_BODY_CHARS)
