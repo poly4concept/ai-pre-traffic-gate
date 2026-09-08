@@ -168,12 +168,102 @@ and siblings, but there is rarely a reason.
 
 ## 2.5c — Security findings
 
-**Not built yet.** Requires enabling Amazon Inspector (≈$0.31/month per function)
-and a branch pinning dependencies with published CVEs. Deferred until end-to-end
-testing.
+**Inspector is enabled.** Lambda *standard* scanning only — dependency CVEs in
+the deployed package, which is what the gate's `SecurityFindings` signal models.
+Not `LAMBDA_CODE`, which costs twice as much and answers a different question.
 
-Until then `SECURITY_SCANNING=false` yields a `SKIPPED` signal — *"we chose not
-to look"* — which is honest and distinguishable from a failure.
+**Cost: ~$0.91/month** — $0.30 per function per month across three functions,
+priced from the AWS Price List API rather than from memory (D-077). This is a
+standing charge, billed hourly whether or not anything deploys.
+
+```powershell
+# check what Inspector thinks it is scanning
+aws inspector2 batch-get-account-status --region us-east-1
+
+# what it has found for the demo app
+aws inspector2 list-findings --region us-east-1 --filter-criteria '{"resourceType":[{"comparison":"EQUALS","value":"AWS_LAMBDA_FUNCTION"}]}'
+```
+
+Findings take roughly 15 minutes to appear after first enablement. Until they
+do, the collector correctly reports the scan as having run and found nothing
+*yet* — which is not the same as a clean bill of health, and the difference is
+why `ListCoverage` is consulted alongside `ListFindings` (D-026).
+
+**Why this stopped being optional.** The first advisory run produced nine
+verdicts and every one of them cited *"Security findings cannot be assessed
+because Inspector is disabled"*. A permanently unavailable signal put a `medium`
+floor under every change, including `safe-bump` — the fixture that exists to be
+the change that must **not** be flagged. See D-077.
+
+**Still outstanding:** a branch pinning dependencies with published CVEs, so
+there is a *finding* rather than an empty-but-real scan. Inspector being on is
+what makes that possible; it is not the same thing.
+
+### Teardown
+
+```powershell
+terraform -chdir=infra/personal apply -var="inspector_enabled=false"
+```
+
+Stops the hourly charge immediately.
+
+---
+
+## 5.4b — Baseline traffic
+
+The other half of the same problem. Health was permanently `unknown` because
+nobody invoked the demo app.
+
+An EventBridge schedule now invokes the `live` alias once a minute, so any
+60-minute window the gate looks at contains ~60 data points instead of zero.
+
+**Cost: inside the free tier** — 43,800 invocations/month against a 1M free
+allowance, plus about a cent of DynamoDB reads for the fault-config lookup.
+
+```powershell
+# is the heartbeat running?
+aws scheduler get-schedule --name ai-pre-traffic-gate-baseline-traffic
+
+# what the gate now sees
+python scripts/drive_traffic.py --alarms-only
+```
+
+**The trap it avoids.** Lambda retries a failed *async* invocation twice by
+default, so with fault injection at 50% one faulted request would publish three
+Errors and the measured error rate would read roughly triple. Retries are set to
+zero in two places — on the function's async config and on the schedule's target
+— because this exists to measure, and a retried invocation is a data point that
+did not happen.
+
+**Not the Phase 8 load generator.** No time-of-day variation, no scheduled fault
+windows, no pipeline driving. One invocation a minute so the denominator is not
+zero.
+
+### Teardown
+
+```powershell
+terraform -chdir=infra/personal apply -var="baseline_traffic_enabled=false"
+```
+
+---
+
+## Turning the security signal off again
+
+Three states, and the gate reports them as three different things — which is the
+whole point of the signals package:
+
+| state | how | what the gate reports |
+| --- | --- | --- |
+| Inspector on | default | a real answer: findings, or a scan that found none |
+| `SECURITY_SCANNING=false` | `-var="security_scanning=false"` | **SKIPPED** — *"we chose not to look"* |
+| Inspector off, scanning on | `-var="inspector_enabled=false"` | **UNAVAILABLE** — *"we tried and could not"* |
+
+The middle and bottom rows cost the same and mean completely different things.
+`SKIPPED` is a decision somebody made; `UNAVAILABLE` is a failure to observe,
+and only the second one should push a verdict upward. Setting
+`inspector_enabled=false` while leaving `security_scanning=true` is the honest
+way to save $0.91/month, and it will keep nudging every verdict toward `medium`
+— which is correct, and is exactly what D-077 was written about.
 
 ---
 

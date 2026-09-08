@@ -322,3 +322,42 @@ variable "escalation_email" {
     error_message = "escalation_email must be a plausible email address, or empty."
   }
 }
+
+# Phase 2.5c -- Amazon Inspector.
+#
+# THE FIRST STANDING COST IN THIS PROJECT, and it is small but real: ~$0.91/month
+# for Lambda standard scanning across three functions, billed hourly whether or
+# not anything deploys. Priced from the AWS Price List API rather than from
+# memory -- see the header of inspector.tf.
+#
+# Defaults ON because a gate whose security signal is permanently UNAVAILABLE
+# pushes every verdict upward and flags changes that are fine (observed in the
+# first advisory run). Turning it off is a legitimate cost decision; turning it
+# off and forgetting is how the gate quietly becomes useless.
+variable "inspector_enabled" {
+  description = "Enable Amazon Inspector Lambda standard scanning (~$0.91/month for 3 functions)."
+  type        = bool
+  default     = true
+}
+
+# Phase 5.4b -- the demo app heartbeat.
+variable "baseline_traffic_enabled" {
+  description = "Invoke the demo app on a schedule so target health has a denominator. Free tier."
+  type        = bool
+  default     = true
+}
+
+variable "baseline_traffic_minutes" {
+  description = "Minutes between heartbeat invocations."
+  type        = number
+  default     = 1
+
+  validation {
+    # Below 1 is not expressible in a rate() expression. Above 15 and a
+    # 60-minute health window holds four data points, which the gate's own
+    # prompt calls "a sample too small to contain an error" -- so the heartbeat
+    # would exist and still leave health effectively unknown.
+    condition     = var.baseline_traffic_minutes >= 1 && var.baseline_traffic_minutes <= 15
+    error_message = "baseline_traffic_minutes must be between 1 and 15."
+  }
+}

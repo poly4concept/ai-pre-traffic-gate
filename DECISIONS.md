@@ -2416,3 +2416,76 @@ Third occurrence of the same rule in this project, after `action_for` and
 `deployment_config_for`: **check what you allow, never what you forbid.** The
 two forms are logically equivalent only when you know the whole domain, and the
 whole point of these guards is the cases where you do not.
+
+---
+
+## D-077 — Inspector and a heartbeat, because a blind gate flags everything
+
+**Decision:** enable Amazon Inspector Lambda standard scanning (~$0.91/month)
+and invoke the demo app once a minute on a schedule. Both default ON, both with
+their own switch and teardown line.
+
+**These are the project's first standing costs**, and the reason is a
+measurement rather than a preference.
+
+**What the first advisory run showed.** Nine real deploys, and every single
+verdict cited the same two absences:
+
+> "The target service has no measurable traffic in the last 60 minutes, making
+> health metrics **unknown** rather than healthy. Security findings cannot be
+> assessed because Inspector is **disabled**..."
+
+Two of the gate's four signals were permanently unavailable. The system prompt's
+rule 1 says missing evidence should push an assessment UP -- correctly -- so the
+result was a **`medium` floor on every change**, including `safe-bump`: the
+one-line dependabot bump that exists in the fixture set precisely to be the
+change that must NOT be flagged.
+
+**The reading that matters.** The model was not miscalibrated. It reasoned
+correctly from evidence it did not have, and the correct answer to "I cannot
+see" is "be careful". A gate pointed at a service nobody invokes, with security
+scanning off, will flag everything -- and be right every time, and be useless.
+
+That is the absent-signal principle, which this whole project is built on,
+producing an operationally worthless result. The fix is not to soften the
+prompt. Softening it would be teaching the gate to treat blindness as safety,
+which is the exact bug the principle exists to prevent (D-026, F-016, F-018).
+**The fix is to let it see.**
+
+**Cost, priced rather than estimated.** From the AWS Price List API,
+`AmazonInspectorV2`, us-east-1:
+
+| | rate | per function/month |
+| --- | --- | --- |
+| `Lambda-Standard-Scanning` | $0.000417/hr | $0.30 |
+| `Lambda-Code-Scanning` | $0.00084/hr | $0.61 |
+
+Three functions, standard only: **$0.91/month.** The heartbeat is inside every
+relevant free tier and adds about a cent of DynamoDB reads.
+
+**LAMBDA_CODE deliberately not enabled.** Twice the price, and it answers a
+different question: standard scanning reads the deployed package's dependency
+manifest for known CVEs, which is what `SecurityFindings` models. Code scanning
+analyses the function's own source for injection flaws and hardcoded secrets --
+which is both out of scope and a strange thing to point at a repository that
+deliberately contains a prompt-injection fixture and a fault switch.
+
+**Why a scheduled heartbeat rather than `drive_traffic.py`.** The script fixes
+the problem for the duration of one command. That is right for testing and wrong
+for a stage demo, where a prerequisite you have to remember to run before the
+interesting part is the thing most likely to go wrong in front of an audience.
+
+**Explicitly NOT the Phase 8 load generator.** That varies traffic by time of
+day, injects scheduled fault windows and drives the pipeline across the scenario
+mix, and it needs a costed plan and sign-off first. This is one invocation a
+minute so the error-rate denominator is not zero.
+
+**Zero retries, in two places, and both are load-bearing.** EventBridge
+Scheduler invokes Lambda asynchronously, and Lambda's default is to retry a
+failed async invocation twice. With fault injection at 50%, one faulted request
+would publish three Errors and the observed error rate would read roughly triple
+its real value -- straight into a signal the gate forms verdicts from. So
+`aws_lambda_function_event_invoke_config` sets `maximum_retry_attempts = 0` for
+the function, and the schedule's `retry_policy` sets it for the invoke call.
+Two different retries, two different owners, one reason: this exists to measure,
+and a retried invocation is a data point that did not happen.
