@@ -240,6 +240,30 @@ def teardown(driver: TrafficDriver | None, region: str, *, cleanup_commits: bool
 
     say("alarms return to OK on their own once the errors stop.", "dim")
 
+    # THE THING THAT SURPRISES YOU EVERY TIME, so it is said out loud (F-029).
+    #
+    # The teardown pushes a cleanup commit, which starts a pipeline, which the
+    # gate will very likely HALT -- and it will be right to. The health window is
+    # 60 minutes and the demo spent the last five deliberately breaking the
+    # service, so the hour still carries a ~28% error rate even though the fault
+    # switch is now off and the latest datapoint is clean.
+    #
+    # Not auto-overridden. The gate's reasoning is correct, and a demo that
+    # silently bypassed its own gate to tidy up would be the worst possible
+    # advert for it.
+    if cleanup_commits:
+        say("")
+        say("EXPECT THE CLEANUP COMMIT TO BE HALTED.", "yellow")
+        say(
+            "  The 60-minute health window still contains the errors this demo\n"
+            "      just injected, so the gate sees an unhealthy target and stops the\n"
+            "      deploy. That is correct behaviour, not a bug.",
+            "dim",
+        )
+        say("  Either wait for the window to clear, or override it:", "dim")
+        say("      python scripts/override.py allow <execution-id> \\", "dim")
+        say('          --reason "post-demo cleanup" --retry', "dim")
+
 
 def run_halt_demo(args) -> int:
     region = args.region

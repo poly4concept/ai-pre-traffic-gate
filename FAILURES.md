@@ -1982,3 +1982,62 @@ Testing a component tells you the component works. It tells you nothing about
 whether the thing it produces survives its destination -- a mail client, a
 console that truncates a UUID, a log line somebody skims. **The output of a
 system is not the same as its behaviour, and only one of them has tests.**
+
+---
+
+## F-029 — The demo's own teardown gets halted, and the gate is right
+
+**Symptom.** After a stage demo, the cleanup commit -- a pure deletion of
+`demo/synthetic/` -- is halted by the gate:
+
+> The target service is currently experiencing a **28.2% error rate over 117
+> invocations in the last 60 minutes**... While the alarms show OK status, the
+> most recent error rate datapoint was 0.0%, suggesting the high error rate
+> occurred earlier in the window but the service may still be unstable.
+> Deploying any change to an unhealthy service significantly increases risk,
+> **even for a deletion-only change removing demo code**.
+
+Seen twice, and initially mistaken for `revert_of_a_bad_deploy` -- the eval
+scenario nothing has solved. It is not that, and the difference matters.
+
+**This verdict is CORRECT.** The service really did fail 28% of its requests in
+the last hour, because the demo spent five minutes deliberately breaking it. The
+model even reasons about the ambiguity properly: alarms OK, latest datapoint
+clean, hour-long average still bad, so treat the target as unstable. That is the
+behaviour we wanted.
+
+**The actual defect is a mismatch between two timescales:**
+
+```
+health window (HEALTH_WINDOW_MINUTES)   60 minutes
+stage demo cycle                        ~5 minutes
+```
+
+So for roughly **55 minutes after every demo**, every deploy correctly sees an
+unhealthy target -- including the cleanup commit the teardown pushes itself. The
+demo walks into its own blast radius.
+
+**Not the same as `revert_of_a_bad_deploy`:**
+
+| | `revert_of_a_bad_deploy` | this |
+| --- | --- | --- |
+| the gate's verdict | **wrong** | **right** |
+| cause | cannot read intent from a commit message | the measurement window outlives the incident |
+| fixable in code | no | yes, it is arithmetic about time |
+
+**Fix: say so.** The teardown now warns that the cleanup commit will very likely
+be halted, explains why, and prints the override command.
+
+**Deliberately NOT auto-overridden.** It would have been two lines. A demo that
+silently bypasses its own gate in order to tidy up is the worst possible advert
+for the gate, and the override path exists precisely so that a human decides --
+including when the human is the person who caused the outage on purpose.
+
+**The generalisable version, and it is worth a slide.** Health signals are
+averages over a window, and a window has memory. A service that was broken and
+is now fine reads as broken for as long as the window is wide. That cuts both
+ways: it is what stops a gate being fooled by one clean minute during an
+incident, and it is what makes it block you for an hour after the incident ends.
+Whether 60 minutes is right is a real decision -- shorter reacts faster and is
+noisier, longer is steadier and holds a grudge -- and it should be made
+deliberately rather than inherited from a default.
