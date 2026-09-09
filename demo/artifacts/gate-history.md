@@ -1,6 +1,6 @@
 # Gate history -- what it did to real deploys
 
-_Generated 2026-09-09 19:33 UTC by `scripts/gate_history.py`._
+_Generated 2026-09-09 19:44 UTC by `scripts/gate_history.py`._
 
 This is the REAL-WORLD rate, as distinct from the eval's fixture-based one.
 A gate that scores well on 23 fixtures and halts half of your actual
@@ -11,33 +11,36 @@ deploys is not deployable, and only this number can tell you that.
 GATE HISTORY -- ai-pre-traffic-gate-demo-app
 ==========================================================================
 
-  23 verdicts from real deploys, 2026-09-06 to 2026-09-09
+  26 verdicts from real deploys, 2026-09-06 to 2026-09-09
   excluding 9 manual `aws lambda invoke` test(s) --
   no pipeline execution, so not a deploy. They fail closed to HIGH by
   design, so counting them would skew the rate upward.
 
   WOULD HAVE HALTED
-    11/23  (48%)
-    actually halted: 4
+    13/26  (50%)
+    actually halted: 6
 
   RISK DISTRIBUTION
-    low         4  #####
-    medium      8  ##########
-    high       11  ##############
+    low         5  ######
+    medium      8  #########
+    high       13  ###############
 
   VERDICT SOURCE
-    model            23
+    model            26
 
   CONTEXT
-    modes:           {'enforcing': 7, 'advisory': 6, 'shadow': 10}
-    prompt versions: {'2026-09-08.1': 7, '2026-09-02.3': 16}
-    overridden:      2
-    median latency:  3587ms
-    input tokens:    65,473
+    modes:           {'enforcing': 10, 'advisory': 6, 'shadow': 10}
+    prompt versions: {'2026-09-08.1': 10, '2026-09-02.3': 16}
+    overridden:      3
+    median latency:  3620ms
+    input tokens:    74,644
 
   THE DECISIONS
     when              risk    source       mode      commit
     ----------------- ------- ------------ --------- ------------
+  ! 2026-09-09T19:44  high    model        enforcing a904c57dae6e
+  ! 2026-09-09T19:41  high    model        enforcing 1dca473db051
+    2026-09-09T19:35  low     model        enforcing ccb5de72edac
   ! 2026-09-09T17:04  high    model        enforcing ccb5de72edac
   ! 2026-09-09T12:09  high    model        enforcing 11a8dba84a01
   ! 2026-09-09T12:06  high    model        enforcing 11a8dba84a01
@@ -55,9 +58,6 @@ GATE HISTORY -- ai-pre-traffic-gate-demo-app
     2026-09-06T16:05  medium  model        shadow    6f0d98c680af
     2026-09-06T16:00  medium  model        shadow    e2ac352a6dbb
     2026-09-06T15:51  medium  model        shadow    d3f0441f66a6
-    2026-09-06T15:40  medium  model        shadow    0448f3b1d754
-    2026-09-06T15:34  medium  model        shadow    1c8c2916facf
-    2026-09-06T14:52  low     model        shadow    d527df79dbfb
 
   READING THIS
     A halt rate this high will not survive contact with colleagues.

@@ -1,6 +1,6 @@
 # Metrics -- every number, and where it came from
 
-_Generated 2026-09-09 19:33 UTC by `scripts/capture_artifacts.py`._
+_Generated 2026-09-09 19:43 UTC by `scripts/capture_artifacts.py`._
 
 ## The two rates (fixture set, 23 scenarios, 3 repeats)
 
@@ -24,20 +24,20 @@ _Source: `DECISIONS.md`, `FAILURES.md`, `pytest --collect-only`._
 
 ## Real deploys (not fixtures)
 
-- verdicts from real pipeline executions: **23**
-- actually halted: **4**
-- risk distribution: high 11, low 4, medium 8
+- verdicts from real pipeline executions: **25**
+- actually halted: **5**
+- risk distribution: high 12, low 5, medium 8
 
 This is the number that decides whether the gate is deployable. A gate that
 scores well on 23 fixtures and halts half your real deploys is not.
 
 ## Latency and size
 
-- median verdict latency: **3587ms**
+- median verdict latency: **3609ms**
 - slowest observed: 6824ms
-- mean input tokens: 2,846
+- mean input tokens: 2,864
 
-_Source: the `ai-pre-traffic-gate-verdicts` table, 23 real executions._
+_Source: the `ai-pre-traffic-gate-verdicts` table, 25 real executions._
 
 ## Cost
 

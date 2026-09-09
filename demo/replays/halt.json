@@ -1,28 +1,28 @@
 {
-  "captured_at": "2026-09-09T17:04:18.833891+00:00",
-  "commit_sha": "ccb5de72edac6a95b5ccbf847d64db1f11b98e59",
+  "captured_at": "2026-09-09T19:41:02.392723+00:00",
+  "commit_sha": "1dca473db0517e50f06466c08656cf93355f6b44",
   "mode": "enforcing",
   "action_taken": "halt_pipeline",
-  "verdict_id": "4d62fc7d-9de1-4db7-9d70-93e2edafa178",
-  "pipeline_execution_id": "649fa11d-39bf-413b-a088-7df91f18db6c",
+  "verdict_id": "acbf7600-56f8-40be-8d54-ac424434f616",
+  "pipeline_execution_id": "711d701f-14c3-427a-977f-7f0efce64d5c",
   "risk_level": "high",
-  "reasoning": "The target service shows a 14% error rate over the last 60 minutes, which is concerning even with only 86 invocations - these are real observed failures, not sampling noise. While alarms are not currently firing, the error rate alarm threshold is 5% and recent datapoints show 0%, suggesting the high error rate may be very recent or intermittent. This is a large change (2263 lines added across 13 files) being deployed to an unhealthy service during rapid deployment activity (5 deploys in 24 hours). The combination of current service instability and a substantial change warrants human review.",
-  "confidence": "0.85",
+  "reasoning": "The target service currently has an active error rate alarm showing 42% errors, which is 8x above the 5% threshold. While the sample size is small (80 invocations), the 15% error rate observed represents actual failures that occurred. Deploying a 648-line change that touches payment settlement and retry logic into an already-unhealthy service creates compounding risk: if the deploy causes issues, distinguishing new problems from existing ones becomes difficult, and the change touches critical payment infrastructure.",
+  "confidence": "0.95",
   "source": "model",
   "floor_raised_from": "",
   "primary_concerns": [
-    "Target service has 14% error rate with 12 observed failures in 86 requests over last 60 minutes",
-    "Large change adding 2263 lines across 13 files",
-    "Rapid deployment cadence with 5 deploys in last 24 hours",
-    "P99 latency at 4853ms is elevated though alarm threshold is 2000ms and not firing"
+    "Active alarm: error rate at 42%, 8x above threshold of 5%",
+    "Target service showing 15% error rate over 80 invocations",
+    "Large change: 648 lines added across payment settlement and retry logic",
+    "Change touches sensitive payment infrastructure during service degradation"
   ],
   "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
   "prompt_version": "2026-09-08.1",
-  "latency_ms": "6824",
-  "input_tokens": "3106",
+  "latency_ms": "5869",
+  "input_tokens": "3040",
   "health": {
-    "error_rate_pct": "13.953488372093023",
-    "invocations_last_hour": "86",
-    "alarms_firing": 0
+    "error_rate_pct": "15",
+    "invocations_last_hour": "80",
+    "alarms_firing": 1
   }
 }
