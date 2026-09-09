@@ -225,6 +225,41 @@ QUIET_TARGET = TargetHealth(
 )
 
 
+# THE QUADRANT THIS SET WAS MISSING, and a real deploy found the gap (F-026).
+#
+# The health fixtures covered three of four combinations:
+#
+#                    clean numbers            bad numbers
+#   high traffic     HEALTHY_TARGET           TARGET_IN_ALARM
+#   low traffic      QUIET_TARGET             -- nothing --
+#
+# So no scenario ever asked "what if there is barely any traffic and what there
+# is looks terrible?" -- and that is exactly where the model got it wrong in
+# production. Shown a real 38% error rate over 91 invocations it called the
+# figure "noise rather than reliable measurement" and returned `medium`,
+# generalising the low-traffic rule symmetrically when the underlying statistics
+# are anything but.
+#
+# These numbers are the real ones from that deploy, not invented: 35 failures in
+# 91 requests. If the service were truly at its 5% alarm threshold, the
+# probability of observing that many is 3.3e-22. It is not a small sample
+# problem; it is a broken service watched briefly.
+LOW_TRAFFIC_HIGH_ERRORS = TargetHealth(
+    error_rate_pct=38.5,
+    p99_latency_ms=4921.0,
+    invocations_last_hour=91,
+    # All three alarms sit OK, which is the second half of why this is hard: the
+    # alarms evaluate 60-second periods and the gate averages 60 minutes, so
+    # during intermittent failure they genuinely disagree. Copied from the real
+    # bundle rather than tidied, because the disagreement is the fixture.
+    alarms=(
+        Alarm(name="demo-app-error-rate", state="OK"),
+        Alarm(name="demo-app-p99-latency", state="OK"),
+        Alarm(name="demo-app-throttles", state="OK"),
+    ),
+)
+
+
 # No traffic at all, and no alarms watching. The state the real demo app was in
 # when the CloudWatch collector was written, and the one that most tempts a
 # verdict layer into a false positive: nothing looks wrong because nothing is
@@ -502,6 +537,16 @@ SCENARIOS: dict[str, dict[str, object]] = {
         "security": NO_FINDINGS,
         "health": QUIET_TARGET,
         "note": "Health metrics are pristine and statistically meaningless.",
+    },
+    # The mirror of the one above, and the one the set was missing (F-026).
+    # A routine change is deliberately paired with it so the ONLY thing that can
+    # move the verdict is the health reading -- if this comes back low, the gate
+    # dismissed 35 failures in 91 requests as a small sample.
+    "low_traffic_high_errors": {
+        "change": SAFE_DEPENDENCY_BUMP,
+        "security": NO_FINDINGS,
+        "health": LOW_TRAFFIC_HIGH_ERRORS,
+        "note": "Few samples, terrible numbers. Statistically decisive, and easy to wave away.",
     },
     "no_health_evidence_at_all": {
         "change": RISKY_PAYMENTS_CHANGE,

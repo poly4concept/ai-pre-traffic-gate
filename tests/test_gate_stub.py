@@ -232,9 +232,11 @@ def test_a_chosen_halt_is_distinguishable_from_a_failed_closed_one(monkeypatch):
     assert chosen["decision"] == failed["decision"] == "halt"
     assert "manually overridden" in chosen["decision_reason"]
     assert failed["verdict_source"] == "fail_closed"
-    assert chosen["action_taken"] == "halt_pipeline"
-    # The Phase 3 restriction: the model's halt is recorded, not acted on.
-    assert failed["action_taken"] == "none"
+    # Both act now (Phase 5.4c). The point of this test was never that one of
+    # them was inert -- it is that the RECORD distinguishes them. A halt somebody
+    # chose and a halt caused by an unreachable model demand completely different
+    # responses from whoever reads the escalation at 20:00.
+    assert chosen["action_taken"] == failed["action_taken"] == "halt_pipeline"
 
 
 # --- Mode independence ----------------------------------------------------
@@ -292,31 +294,69 @@ def test_mode_does_not_alter_the_verdict(monkeypatch):
 # point of writing them: the restriction is asserted, not assumed.
 
 
-def test_the_models_halt_is_recorded_and_not_acted_on(monkeypatch):
-    """Even in enforcing mode. Phase 3 is shadow-only for the MODEL's verdict."""
+def test_the_models_halt_now_stops_the_pipeline_in_enforcing_mode(monkeypatch):
+    """Phase 5.4c, and the inversion of what this test used to assert.
+
+    From Phase 3 until now the model could form a `high` verdict and nothing
+    happened -- `MODEL_VERDICT_CAN_ACT = False` was the whole shadow-mode
+    restriction. Flipping it is the last step of Phase 5, and this test flipped
+    with it rather than being deleted: the git history of this assertion is the
+    clearest record of when the model was given authority.
+    """
     handler = load(monkeypatch, None, "enforcing")
 
     gate = run(handler, monkeypatch, outcome=model_outcome("high"))
 
     assert gate["decision"] == "halt"
     assert gate["would_have_halted"] is True
-    assert gate["action_taken"] == "none"
-    assert gate["model_verdict_can_act"] is False
+    assert gate["action_taken"] == "halt_pipeline"
+    assert gate["model_verdict_can_act"] is True
 
 
-def test_a_human_halt_still_acts_while_the_models_does_not(monkeypatch):
-    """The asymmetry, stated directly.
+@pytest.mark.parametrize("mode", ["shadow", "advisory"])
+def test_the_models_halt_still_does_nothing_outside_enforcing(monkeypatch, mode):
+    """Authority is granted by the MODE, not by the constant.
 
-    A human typing `halt` is not the model acting, so the kill switch is not
-    subject to the Phase 3 restriction. Losing it during the shadow period would
-    be the wrong kind of caution.
+    `MODEL_VERDICT_CAN_ACT` says the model's verdict is allowed to matter at
+    all; the mode says whether anything may block today. Both must agree, so
+    shadow and advisory are unchanged by 5.4c -- which is what makes them a
+    usable rollback if enforcing turns out to over-flag.
     """
-    by_model = run(load(monkeypatch, None, "enforcing"), monkeypatch, outcome=model_outcome("high"))
-    by_human = run(load(monkeypatch, "halt", "enforcing"), monkeypatch)
+    handler = load(monkeypatch, None, mode)
 
-    assert by_model["decision"] == by_human["decision"] == "halt"
-    assert by_model["action_taken"] == "none"
-    assert by_human["action_taken"] == "halt_pipeline"
+    gate = run(handler, monkeypatch, outcome=model_outcome("high"))
+
+    assert gate["decision"] == "halt"
+    assert gate["would_have_halted"] is True
+    assert gate["action_taken"] == "none"
+
+
+def test_the_kill_switch_survives_revoking_the_models_authority(monkeypatch):
+    """The asymmetry that OUTLIVES the Phase 3 restriction, stated precisely.
+
+    Two things could stop a halt from acting, and they are not the same thing:
+
+        the MODE            may anything block today?       governs everyone
+        MODEL_VERDICT_CAN_ACT  may the MODEL's opinion act?  governs the model
+
+    The mode governs both -- in shadow nothing acts, not even a human typing
+    `halt`, because a promise that this gate cannot affect deploys is worthless
+    if a config variable can break it (D-076).
+
+    `MODEL_VERDICT_CAN_ACT` governs only the model. So if 5.4c has to be rolled
+    back -- the model over-flags, someone sets it False and redeploys -- the
+    human kill switch must keep working. That is the property this asserts, by
+    simulating exactly that rollback.
+    """
+    handler = load(monkeypatch, "halt", "enforcing")
+    monkeypatch.setattr(handler, "MODEL_VERDICT_CAN_ACT", False)
+
+    by_human = run(handler, monkeypatch, outcome=model_outcome("low"))
+
+    assert by_human["decision"] == "halt"
+    assert by_human["action_taken"] == "halt_pipeline", (
+        "revoking the model's authority must not disarm the human kill switch"
+    )
 
 
 @pytest.mark.parametrize(

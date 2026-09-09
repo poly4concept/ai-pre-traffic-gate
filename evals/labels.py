@@ -219,6 +219,35 @@ LABELS: tuple[Label, ...] = (
         expected_concerns=("traffic", "insufficient", "statistic", "12", "meaningful"),
     ),
     Label(
+        scenario="low_traffic_high_errors",
+        kind=Kind.RISKY,
+        acceptable=frozenset({MEDIUM, HIGH}),
+        ideal=HIGH,
+        rationale=(
+            "THE MIRROR OF quiet_target_looks_healthy, AND ADDED AFTER A REAL "
+            "DEPLOY EXPOSED THE GAP (F-026). The fixture set had high-traffic-good, "
+            "high-traffic-bad and low-traffic-good, and nothing for "
+            "low-traffic-BAD. That missing quadrant is precisely where the model "
+            "failed in production: shown 38% errors over 91 invocations it called "
+            "the figure 'noise rather than reliable measurement' and returned "
+            "`medium`.\n\n"
+            "It is not noise. If the service were truly at its 5% alarm threshold, "
+            "the probability of observing 35 failures in 91 requests is 3.3e-22. "
+            "Absence of failures is weak evidence at a small sample; presence of "
+            "many is decisive at any sample. Same n, opposite strength.\n\n"
+            "`high` is the ideal: a target failing more than a third of its "
+            "requests is unhealthy and a human should look. `medium` is accepted "
+            "rather than ideal because a canary into a broken service is at least "
+            "cautious, and because the alarms genuinely read OK -- they evaluate "
+            "60-second periods while the gate averages 60 minutes, so the two "
+            "views really do disagree. `low` is indefensible at any sample size.\n\n"
+            "Labelled after the fact, which is worth stating plainly: every other "
+            "label in this file was written blind. This one was not, and the only "
+            "thing defending it is that 38% errors is not a matter of taste."
+        ),
+        expected_concerns=("error rate", "38", "unhealthy", "degrad", "failing"),
+    ),
+    Label(
         scenario="many_low_severity_findings",
         kind=Kind.BENIGN,
         acceptable=frozenset({LOW, MEDIUM}),

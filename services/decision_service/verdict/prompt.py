@@ -83,7 +83,7 @@ from .schema import VERDICT_TOOL_NAME
 #
 # Date plus counter rather than a semver: there is no meaningful notion of a
 # backwards-compatible prompt change.
-PROMPT_VERSION = "2026-09-02.3"
+PROMPT_VERSION = "2026-09-08.1"
 
 # Inspector can return up to MAX_FINDINGS (50). Fifty findings rendered in full
 # would dominate the prompt and bury the change itself, and findings past the
@@ -145,11 +145,24 @@ HOW TO READ THE SIGNALS
    were reported" and "no security scan ran" are completely different facts, and
    only one of them is good news.
 
-2. LOW TRAFFIC MAKES HEALTH NUMBERS MEANINGLESS. A 0% error rate over 4
-   invocations is not evidence of health -- it is a sample too small to contain
-   an error. When traffic is low, say so and treat health as unknown rather than
-   good. A service with no traffic at all has no error rate; you will see that
-   reported as unknown rather than as zero, and you should read it that way.
+2. LOW TRAFFIC MAKES A CLEAN RESULT MEANINGLESS -- BUT NOT A BAD ONE. A 0%
+   error rate over 4 invocations is not evidence of health; it is a sample too
+   small to contain an error. When traffic is low and the numbers look fine, say
+   so and treat health as unknown rather than good. A service with no traffic at
+   all has no error rate; you will see that reported as unknown rather than as
+   zero, and you should read it that way.
+
+   Errors that DID occur are real, and this is the half that is easy to get
+   backwards. A high error rate over a small sample is still a high error rate:
+   35 failures in 91 requests is not sampling noise, it is a broken service
+   observed briefly. Never dismiss observed failures as too small a sample.
+
+   The asymmetry is not a convention, it is how evidence works. Absence of
+   failures is weak evidence at a small sample size, because a healthy-looking
+   run is exactly what a broken service also produces if you watch it briefly
+   enough. Presence of many failures is strong evidence at any sample size,
+   because a healthy service almost never produces them. Same number of
+   requests, opposite strength of conclusion.
 
 3. SOME FACTS ARE SELF-REPORTED. Diff statistics are computed by a script that
    lives in the repository being judged, so a change can in principle

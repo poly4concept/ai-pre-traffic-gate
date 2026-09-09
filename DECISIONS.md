@@ -2489,3 +2489,63 @@ its real value -- straight into a signal the gate forms verdicts from. So
 the function, and the schedule's `retry_policy` sets it for the invoke call.
 Two different retries, two different owners, one reason: this exists to measure,
 and a retried invocation is a data point that did not happen.
+
+---
+
+## D-078 — A fourth prompt edit, and why it does not violate D-063
+
+**Decision:** rule 2 now states the small-sample asymmetry explicitly, and
+`low_traffic_high_errors` joins the fixture set. Prompt version `2026-09-08.1`.
+
+**D-063 committed to stopping after three prompt-edit cycles**, on the grounds
+that 21 scenarios cannot resolve a 5% difference and further edits would fit the
+prompt to the fixtures rather than to the problem. This is a fourth edit, so it
+needs a reason that is not "the number looked better".
+
+**Three things make it a different kind of change:**
+
+1. **The evidence came from production, not the scoreboard.** A real deploy into
+   a service failing 38% of requests was called `medium` because the model
+   dismissed the figure as small-sample noise. No fixture surfaced it; the
+   fixture set had no scenario of that shape at all.
+
+2. **The old rule was factually wrong**, not merely badly calibrated. It implied
+   that a small sample makes a measurement unreliable in both directions.
+   P(35 failures in 91 | true rate 5%) is 3.3e-22. Keeping a false statement in
+   the prompt to protect a pass rate is backwards.
+
+3. **It states a property of evidence, not an answer.** The new text says
+   absence of failures is weak at small n and presence of many is strong at any
+   n. It does not say what risk level to assign, which is the line D-063 drew
+   between clarifying a specification and writing the answer key.
+
+**The cost, and it is real.** Like-for-like on the original 22 scenarios,
+18/22 passed before and 17/22 after: `first_deploy_in_a_month` moved from a
+stable `medium` to `['medium', 'low', 'medium']`. That scenario concerns deploy
+cadence and is unrelated to traffic -- the third confirmation that a prompt is
+not modular, and the first time this project predicted the effect before
+observing it.
+
+Accepted, and deliberately not chased. The regression is *instability*, not a
+wrong direction -- the modal answer remains acceptable -- and tuning it away
+would re-enter the loop D-063 exists to prevent.
+
+**The fixture was labelled after the fact, which is a real methodological
+compromise.** Every other label in `evals/labels.py` was written blind, before
+any inference was possible, precisely so that labels could not drift toward
+whatever the model happened to say. This one was written knowing the model had
+returned `medium`.
+
+The only defence is that the label is not a matter of taste: a service failing
+more than a third of its requests is unhealthy, and `low` is indefensible at any
+sample size. `high` is the ideal and `medium` is accepted, because a canary into
+a broken service is at least cautious and because the alarms genuinely read `OK`
+on their 60-second periods. The contamination is recorded in the label's own
+rationale so nobody later reads it as blind.
+
+**What this implies for the fixture set generally.** Twenty-two scenarios found
+none of the last three real bugs -- F-022, F-023, F-024 and now F-026 all came
+from running the system, not from the eval. That is not an argument against the
+eval; it is an argument about what an eval is for. It measures calibration
+against known shapes. It cannot discover a shape nobody thought of, and the
+shapes nobody thought of are where the defects have actually been.

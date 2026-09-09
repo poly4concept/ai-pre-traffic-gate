@@ -1745,3 +1745,95 @@ that turned out to be a wish.
 Nine tests now cover the override path through the executor, including the two
 directions (`allow` shipping a `high`, `halt` stopping a `low`) and the refusal
 to guess at an unrecognised value.
+
+---
+
+## F-026 — A rule written in one direction, applied in both
+
+**Symptom.** A real enforcing-mode deploy, into a service genuinely failing 38%
+of its requests, came back `medium`. The model said why:
+
+> "the target service shows a 38% error rate over the last 60 minutes -- though
+> this is based on only 91 invocations, **making it noise rather than reliable
+> measurement**"
+
+**Cause: my prompt.** Rule 2 read:
+
+> LOW TRAFFIC MAKES HEALTH NUMBERS MEANINGLESS. A 0% error rate over 4
+> invocations is not evidence of health -- it is a sample too small to contain
+> an error.
+
+I wrote that to stop the gate trusting *good* news from thin data. The model
+generalised it symmetrically and used it to dismiss *bad* news from thin data.
+Which is a perfectly reasonable reading of the sentence I actually wrote.
+
+**Why the generalisation is wrong**, and the arithmetic is the whole argument:
+
+```
+observed: 35 failures in 91 requests
+
+  if the service were truly at  1%:  P(35+ failures) = 1.1e-45
+  if the service were truly at  5%:  P(35+ failures) = 3.3e-22
+  if the service were truly at 10%:  P(35+ failures) = 6.1e-13
+
+the case the rule WAS written for:
+  if the service were truly at  5%:  P(zero failures in 91) = 0.0094
+```
+
+Same sample size, opposite strength of conclusion. **Absence of failures is weak
+evidence at a small n**, because a briefly-observed broken service produces it
+too. **Presence of many failures is decisive at any n**, because a healthy
+service essentially never does. That asymmetry is not a convention; it is what
+the binomial distribution says, and my one-sentence rule flattened it.
+
+**Why 22 scenarios never caught it.** The health fixtures covered three of four
+quadrants:
+
+| | clean numbers | bad numbers |
+| --- | --- | --- |
+| **high traffic** | `HEALTHY_TARGET` | `TARGET_IN_ALARM` |
+| **low traffic** | `QUIET_TARGET` | **nothing** |
+
+No scenario ever asked *"what if there is barely any traffic and what there is
+looks terrible?"* -- and the bug lived in exactly that hole. A fixture set can
+only find bugs in the shapes it contains, and the shapes it contains are the
+ones its author thought of.
+
+**A second, quieter contributor.** The same bundle showed a 38% error rate and
+all three alarms `OK`. Not a contradiction: the alarms evaluate 60-second
+periods and the gate averages 60 minutes, so during intermittent failure they
+genuinely disagree. The model weighed "no alarms firing" against "38% over an
+hour" and split the difference. Two views of health with different time
+constants, handed over as equals.
+
+**Fix.** Rule 2 now states the asymmetry explicitly, and
+`LOW_TRAFFIC_HIGH_ERRORS` fills the missing quadrant using the real numbers from
+the deploy that exposed it. After the change the scenario returns a stable
+`medium` with the model reasoning *"an observed error rate this high is real
+evidence of a broken or degraded service"* -- and `quiet_target_looks_healthy`
+still returns `low`, so it did not simply over-correct.
+
+**The cost, stated rather than buried.** Like-for-like on the original 22
+scenarios the pass count went **18/22 to 17/22**: `first_deploy_in_a_month` was
+a stable `medium` and is now `['medium', 'low', 'medium']`. That scenario is
+about deploy cadence and has nothing to do with traffic. Third confirmation of
+D-063 -- **a prompt is not modular** -- and this time it was predicted rather
+than discovered.
+
+Accepted anyway. The old rule was *logically wrong* and had produced a real
+under-call on a real deploy; keeping a false statement in the prompt to protect
+a scoreboard is precisely backwards. The regression is instability rather than a
+directional error -- the modal answer is still acceptable -- and chasing it would
+be re-entering the tuning loop D-063 exists to prevent.
+
+**Two lessons:**
+
+1. **When you write a rule about evidence, say which direction it runs in.**
+   "Small samples are unreliable" is true of one tail and false of the other,
+   and a reader who applies it evenly is following your instruction, not
+   ignoring it.
+
+2. **Enumerate the quadrants.** Three of four combinations covered looks like
+   coverage until you draw the grid. The missing cell was not an oversight of
+   effort; it was an oversight of imagination, and drawing a 2x2 would have
+   found it in seconds.

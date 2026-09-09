@@ -90,15 +90,41 @@ from verdict import (
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# --- Phase 3 restriction --------------------------------------------------
+# --- Phase 5.4c: the model's verdict may now stop a pipeline ---------------
 #
-# The gate judges and records; it does not act. Phase 5 sets this True, adds the
-# executor's risk branching, and only then moves through advisory to enforcing.
+# This was False from Phase 3 until now, and flipping it is the whole of Phase
+# 5's final step. Phase 3 promised it would be "a visible, reviewable, one-line
+# change rather than an archaeology exercise", and this is the line.
 #
-# The manual override below is deliberately NOT subject to this flag: a human
-# typing `halt` is not the model acting, and losing the kill switch during the
-# shadow period would be the wrong kind of caution.
-MODEL_VERDICT_CAN_ACT = False
+# WHAT HAD TO BE TRUE FIRST, in order, and each was verified rather than assumed:
+#
+#   the executor can read a verdict at all   5.1, and it could not until F-023
+#   a halt reaches a human                   5.2, confirmed by a real email
+#   a human can overrule it                  5.3, per execution, expiring
+#   the mode governs blocking everywhere     D-076
+#   the gate can actually see                Inspector + heartbeat, D-077
+#   the health rule is not backwards         F-026
+#
+# The last two matter most. Before them, two of four signals were permanently
+# unavailable and every ordinary change came back `medium` -- so enforcing would
+# have been enforcing on blindness. A gate that cannot see is not made safer by
+# giving it authority.
+#
+# WHAT THIS DOES NOT CHANGE, and it is the project's central claim: the gate
+# still holds no deploy permissions. `halt_pipeline` calls PutJobFailureResult
+# on a job CodePipeline already handed it. The worst a successful prompt
+# injection achieves is a wrong verdict -- it cannot deploy, because the
+# credentials to deploy are not in this process (D-032).
+#
+# TO REVERT: set this False and redeploy. It is deliberately a code constant and
+# not an environment variable -- turning the model's authority on or off should
+# be a reviewed commit, not something a hurried `terraform apply -var` can do at
+# 20:00 on a Friday.
+#
+# The manual override is deliberately NOT subject to this flag: a human typing
+# `halt` is not the model acting, and losing the kill switch would be the wrong
+# kind of caution.
+MODEL_VERDICT_CAN_ACT = True
 
 ALLOW = "allow"
 HALT = "halt"
