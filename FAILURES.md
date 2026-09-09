@@ -1837,3 +1837,88 @@ be re-entering the tuning loop D-063 exists to prevent.
    coverage until you draw the grid. The missing cell was not an oversight of
    effort; it was an oversight of imagination, and drawing a 2x2 would have
    found it in seconds.
+
+---
+
+## F-027 — The system worked; the configuration was invisible
+
+**Symptom.** An enforcing-mode demo run in which the gate did everything right
+and nothing was blocked.
+
+The gate collected all three signals, spotted a 44.65% error rate over 159
+invocations, spotted the active alarm, and returned `high` at 0.92 confidence
+with reasoning that quoted the freshly-fixed rule back at us:
+
+> "This is not a small sample -- 159 requests is sufficient to establish that
+> the service is genuinely broken right now."
+
+It escalated. SNS accepted the publish. And the deploy went out anyway, because
+`GATE_MODE` was `advisory`, not `enforcing`.
+
+**Cause.** The operator had set enforcing earlier. Then a `terraform apply` --
+recommended by me, as step 1 of the run -- read `terraform.tfvars`, which still
+said `gate_mode = "advisory"`, and reset it. Nothing was wrong with the gate.
+Nothing errored. The audit record said `"mode": "advisory"` in plain text and
+nobody was looking at that field.
+
+**The second half: the escalation email "did not arrive".** It had. SNS reported
+`1 published, 1 delivered, 0 failed`, the subscription was confirmed, and there
+was no filter policy. It was sitting in Gmail's Promotions tab. Separately, the
+subject line was byte-identical to the previous halt's -- same sender, same
+subject -- which mail clients thread into a single conversation, so the next one
+would have arrived pre-collapsed under an old one.
+
+**The real defect is neither of those.** A demo run needs six things true at
+once, and they live in five places:
+
+| precondition | where it lives |
+| --- | --- |
+| `gate_mode` | `terraform.tfvars` -> Lambda env |
+| `executor_enforces_verdict` | `terraform.tfvars` -> Lambda env |
+| `MODEL_VERDICT_CAN_ACT` | a **code constant** -- no AWS API can report it |
+| SNS subscription confirmed | out of band, by clicking a link in an email |
+| fault injection | a DynamoDB row |
+| alarm firing | emergent, from traffic rate vs alarm period |
+
+Nothing displayed them together and nothing checked they agreed. Every failure
+in the run was a precondition being wrong; not one was a bug in the gate.
+
+**And that is the more dangerous of the two.** A broken gate announces itself.
+A correctly-functioning gate wired to the wrong configuration produces
+completely plausible output -- correct verdicts, real escalations, sensible
+logs -- while doing nothing. The operator's reasonable conclusion was "the gate
+is broken", and the gate was fine.
+
+**Fix: `scripts/preflight.py`.** One read-only command that reports all six and
+answers "am I ready to demo X?" with a non-zero exit if not. Three properties
+that matter more than the checks themselves:
+
+  * **It reads AWS, never `terraform.tfvars`.** The file says what somebody
+    intended; the Lambda's environment says what is running. Today those
+    differed and only the second was true. F-023's lesson applied to config.
+  * **`MODEL_VERDICT_CAN_ACT` is read from the last verdict record**, because
+    the gate stamps every verdict with the value it ran under -- the deployed
+    system describing itself rather than a file hoping to describe it. The field
+    had to be added to the audit record for this, the third time in this project
+    a value was computed, logged, and never stored (F-022).
+  * **It reports the traffic rate**, because the alarm needs ~10 invocations a
+    minute to hold under intermittent faults and the heartbeat provides one.
+
+**And the subject line now carries the short SHA**, so two halts never produce
+the same subject. For a message whose entire purpose is to interrupt somebody,
+being threaded under an older one is total failure.
+
+**A bug in the fix, worth recording because it is the same shape as the thing
+it was fixing.** The log-reading fallback used
+`filter_log_events(..., limit=20)` and took the newest of those. But
+`filter_log_events` returns matches in ASCENDING time order, so `limit` selects
+the twenty OLDEST in the window. Preflight reported `can_act = false` while the
+gate had logged `true` minutes earlier -- **a check confidently reporting a
+stale value as current**, which is worse than no check, because it is believed.
+Fixed by paging to the end and keeping the genuinely latest event.
+
+**The lesson, and it is the one for the talk:** the interesting failures in a
+system assembled from managed services are not in the components. They are in
+the configuration that decides what the components do, which is spread across
+files, consoles, environment variables and out-of-band confirmations, and which
+nothing renders in one place. Build the thing that renders it.

@@ -121,13 +121,26 @@ def build_subject(gate: dict[str, Any], service: str) -> str:
         state = "WOULD HALT"
 
     risk = str(gate.get("risk_level", "unknown"))
-    subject = f"[{state}] {service} -- {risk} risk"
+
+    # The short SHA makes each subject unique, and that is not cosmetic (F-027).
+    # Mail clients thread on sender plus subject, so two halts with identical
+    # subjects arrive as one conversation -- the second collapsed under the
+    # first, looking like something already read. For a message whose entire job
+    # is to interrupt somebody, being mistaken for an old one is total failure.
+    #
+    # The SHA rather than a timestamp or the verdict ID: it is short, it is the
+    # thing the reader will search for, and it is what they will paste into
+    # `git show`.
+    sha = str(gate.get("commit_sha", ""))[:8]
+    marker = f" {sha}" if sha else ""
+    subject = f"[{state}]{marker} {service} -- {risk} risk"
 
     if len(subject) > MAX_SUBJECT_CHARS:
-        # Trim the service name, never the state or the risk level. Those two
-        # are the whole point; the service is recoverable from the body.
-        room = MAX_SUBJECT_CHARS - len(f"[{state}]  -- {risk} risk") - 3
-        subject = f"[{state}] {service[: max(room, 0)]}... -- {risk} risk"
+        # Trim the service name, never the state, the SHA or the risk level.
+        # Those three are the whole point; the service is recoverable from the
+        # body, and is the same on every message anyway.
+        room = MAX_SUBJECT_CHARS - len(f"[{state}]{marker}  -- {risk} risk") - 3
+        subject = f"[{state}]{marker} {service[: max(room, 0)]}... -- {risk} risk"
     return subject[:MAX_SUBJECT_CHARS]
 
 

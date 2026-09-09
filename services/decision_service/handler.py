@@ -541,6 +541,7 @@ def write_audit_record(
         call=outcome.call,
         mode=gate["mode"],
         action_taken=gate["action_taken"],
+        model_verdict_can_act=gate["model_verdict_can_act"],
         raw_model_output=outcome.raw_model_output,
         pipeline_execution_id=pipeline_execution_id,
         override=gate.get("override"),
@@ -722,6 +723,13 @@ def lambda_handler(
     # Carried so the escalation email can print the exact override command for
     # this deploy rather than a runbook reference.
     gate["pipeline_execution_id"] = execution_id
+
+    # Carried so the escalation SUBJECT can be unique per deploy. Two halts an
+    # hour apart used to produce byte-identical subject lines, which mail
+    # clients thread into one conversation -- so the second one arrives already
+    # collapsed under the first and reads as something you have seen (F-027).
+    change = getattr(getattr(bundle, "change", None), "data", None)
+    gate["commit_sha"] = change.commit_sha if change else ""
 
     # Written before the pipeline is told anything. If the audit write and the
     # pipeline report disagree about ordering, the record of a halt should exist

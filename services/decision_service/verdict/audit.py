@@ -106,6 +106,7 @@ def build_record(
     call: ModelCall,
     mode: str,
     action_taken: str,
+    model_verdict_can_act: bool = False,
     raw_model_output: Any = None,
     pipeline_execution_id: str | None = None,
     override: dict[str, Any] | None = None,
@@ -150,6 +151,16 @@ def build_record(
         # with the gate's behaviour. This freezes what the gate actually thought
         # at the time -- the same argument as storing `prompt_version`.
         "would_have_halted": verdict.is_blocking,
+        # WHICH CONFIGURATION PRODUCED THIS VERDICT, and the same omission as
+        # `would_have_halted` before it (F-022): logged since Phase 3, never
+        # stored. `mode` above says whether anything could block; this says
+        # whether the MODEL's opinion was allowed to be the thing that did.
+        #
+        # It is also the only way to discover what the DEPLOYED gate is running.
+        # The constant lives in code, not in an environment variable, so nothing
+        # in the AWS console can tell you its value -- but every verdict can.
+        # `scripts/preflight.py` reads it from here for exactly that reason.
+        "model_verdict_can_act": model_verdict_can_act,
         # CLAUDE.md constraint 3: "every verdict is auditable and OVERRIDABLE",
         # and an override nobody recorded is indistinguishable from the gate
         # having decided that way on its own. Stored even when it agrees with the
