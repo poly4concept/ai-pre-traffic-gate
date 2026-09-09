@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from verdict import ModelCall, RiskLevel, Verdict, VerdictOutcome, VerdictSource
+from verdict import ModelCall, RiskLevel, Verdict, VerdictOutcome, VerdictSource, apply_floor
 
 # Paths whose contents tend to matter more when they break.
 SENSITIVE_MARKERS = ("payments/", "auth/", "billing/", "settlement")
@@ -142,18 +142,35 @@ class AttributeCountingClient:
             "; ".join(notes) if notes else "nothing notable."
         )
 
-        return VerdictOutcome(
-            verdict=Verdict(
+        # Phase 5.5. The floor is part of the GATE, not part of the model, so
+        # the baseline gets it too -- otherwise the comparison is
+        # gate-with-a-floor against arithmetic-without-one, which flatters the
+        # model by exactly the amount the floor is worth.
+        #
+        # It also raises the bar honestly: the floor IS arithmetic, so a
+        # baseline denied it would be an artificially weak opponent.
+        floored = apply_floor(
+            Verdict(
                 risk_level=level,
                 reasoning=reasoning[:600],
                 source=VerdictSource.MODEL,
-                # A fixed value, and honestly meaningless -- which is the point.
-                # A number in this field is not evidence of calibration, whether
-                # it comes from arithmetic or from a language model.
+                # A fixed value, and honestly meaningless -- which is the
+                # point. A number in this field is not evidence of
+                # calibration, whether it comes from arithmetic or from a
+                # language model.
                 confidence=0.5,
                 primary_concerns=tuple(notes[:5]),
                 model_id=self.MODEL_ID,
             ),
+            bundle,
+        )
+
+        return VerdictOutcome(
+            # Returned as-is, so `floor_raised_from` survives into the audit
+            # record and the eval. Rebuilding it field by field would drop
+            # exactly the field that says the arithmetic, not the scoring,
+            # produced this level.
+            verdict=floored,
             call=ModelCall(
                 model_id=self.MODEL_ID,
                 prompt_version="baseline",

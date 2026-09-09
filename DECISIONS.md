@@ -2549,3 +2549,287 @@ from running the system, not from the eval. That is not an argument against the
 eval; it is an argument about what an eval is for. It measures calibration
 against known shapes. It cannot discover a shape nobody thought of, and the
 shapes nobody thought of are where the defects have actually been.
+
+---
+
+## D-079 — Configuration gets a preflight, because six settings in five places is the real system
+
+**Decision:** `scripts/preflight.py` reports every precondition the gate depends
+on, reads them from AWS rather than from Terraform, and exits non-zero when a
+named scenario is not achievable.
+
+**What prompted it.** An enforcing-mode run in which the gate behaved
+impeccably -- `high` at 0.92 confidence, correct reasoning, real escalation --
+and nothing was blocked, because a `terraform apply` had reset `gate_mode` to
+`advisory` from a tfvars file. Then a second run where the email arrived,
+correct in every particular, and could not be acted on because a mail client
+had threaded and collapsed it.
+
+Neither was a defect in a component. Both were the configuration and the
+delivery around the components, which nothing rendered in one place.
+
+**The six, and where they hide:**
+
+| precondition | lives in |
+| --- | --- |
+| `gate_mode` | `terraform.tfvars` -> Lambda env |
+| `executor_enforces_verdict` | `terraform.tfvars` -> Lambda env |
+| `MODEL_VERDICT_CAN_ACT` | a **code constant** -- no AWS API reports it |
+| SNS subscription confirmed | out of band, by clicking a link |
+| fault injection | a DynamoDB row |
+| alarm firing | emergent, from traffic rate vs alarm period |
+
+**Three properties that matter more than the checks:**
+
+1. **It reads AWS, never the repository.** `terraform.tfvars` says what somebody
+   intended; the Lambda's environment says what is running. Those diverge the
+   moment anyone applies with a `-var`, and only the second is true. F-023's
+   lesson, applied to configuration rather than to an event shape.
+
+2. **`MODEL_VERDICT_CAN_ACT` comes from the deployed system describing itself.**
+   It is a code constant, so no console can show it -- but the gate stamps every
+   verdict and every log line with the value it ran under. Reading it back is
+   the only honest source. It required adding the field to the audit record,
+   the third value in this project that was computed, logged, and never stored
+   (F-022).
+
+3. **It reports the traffic rate**, because the alarm's 60-second period needs
+   roughly ten invocations a minute to be stable under intermittent faults and
+   the heartbeat provides one. At one per minute every alarm evaluation is a
+   sample of size one, so the alarm flaps -- which looks exactly like the fault
+   injection not working. Two consumers of the same traffic with sampling needs
+   two orders of magnitude apart.
+
+**Why a script and not a runbook section.** A runbook is a checklist somebody
+follows when they remember to. Six preconditions across five systems is past
+what anyone reliably holds, and the failure mode is not "the demo breaks" -- it
+is "the demo appears to work and quietly does not", which is the same shape as
+every other silent failure this project has logged.
+
+**The general claim, and it is the one for the talk:** on a system assembled
+from managed services, the components are the easy part. The defects cluster in
+the configuration that decides what those components do, which is spread across
+files, consoles, environment variables and out-of-band confirmations, and which
+nothing renders together. Build the thing that renders it, and make it refuse.
+
+---
+
+## D-080 — The security under-flagging is a specification gap, not a capability gap
+
+**Measured, not argued.** Claude Sonnet 4.5 against the same 23 scenarios, three
+repeats, same prompt (`2026-09-08.1`):
+
+| | Haiku 4.5 | Sonnet 4.5 |
+| --- | --- | --- |
+| under-flagging | 27.3% (3/11) | **27.3% (3/11)** |
+| over-flagging | 9.1% (1/11) | **9.1% (1/11)** |
+| acceptable | 77.3% | 81.8% |
+| exactly the ideal | 54.5% | **77.3%** |
+| stable across repeats | 95.7% | **100%** |
+
+Both headline rates identical, and both models fail the same four scenarios in
+the same direction, stably:
+
+```
+critical_cve_no_patch          haiku=low   sonnet=low
+critical_cve_with_patch        haiku=low   sonnet=low
+untriaged_severity_findings    haiku=low   sonnet=low
+revert_of_a_bad_deploy         haiku=high  sonnet=high
+```
+
+Sonnet's reasoning is not a worse version of the argument -- it is the *same*
+argument: a routine dependency bump into a healthy target, with the pre-existing
+finding discounted because this change did not introduce it.
+
+**What this settles.** D-059 recorded the security under-flagging as needing
+"either a different model or a deterministic pre-check", and I led with the
+model half. This is the experiment that decides it. A materially more capable
+model, better calibrated on almost every other axis, reaches the identical
+conclusion on all three security scenarios.
+
+> That is not a capability gap. It is a question the prompt does not answer, and
+> no model can answer it for us because it is a policy: does a gate flag every
+> deploy to a service carrying an unpatchable CVE, or only ones that make things
+> worse?
+
+**Consequence: the deterministic security floor is correct regardless of model.**
+Build it, and stop treating the security scenarios as a model-selection
+criterion. Code owns the countable facts; the model owns the judgement. The
+Phase 4b finding that fifteen lines of arithmetic beat Haiku *specifically on
+the security scenarios* was the first evidence of this; this is the
+confirmation.
+
+**Model selection therefore turns on everything else**, where Sonnet wins
+clearly: +23pp exactly-the-ideal, perfect stability, and reasoning prose that is
+the actual product of every escalation. It reached `high` on
+`low_traffic_high_errors` and `no_health_evidence_at_all` where Haiku settled
+for `medium`. Cost is not a factor at one inference per deploy.
+
+**The operational catch, and it is not cosmetic.** `READ_TIMEOUT_SECONDS = 8`
+was tuned against Haiku, whose 27 real production calls ran a median of 3.6s and
+a maximum of 4.5s. Two of Sonnet's 69 eval calls exceeded 8 seconds. At ~3%,
+that is a retry on one deploy in thirty -- and a retry that also times out fails
+closed and halts a perfectly good deploy. Switching model means re-deriving the
+timeout budget, not incrementing one constant: the read timeout sits inside
+`DEADLINE_SECONDS = 18`, which sits inside a 30-second Lambda timeout, which
+also has to cover signal collection and the audit write.
+
+**The general lesson for anyone choosing a model for a gate:** the benchmark
+tells you about judgement and says nothing about the tail latency you will
+operate against. Those are different measurements and only one of them was in
+the eval harness.
+
+---
+
+## D-081 — Nova Pro has the best headline rate and is the wrong model
+
+**Measured, because Marketplace billing made it worth asking.** Anthropic models
+on Bedrock bill through AWS Marketplace (`USE1-MP:` usage types, appearing as
+"Claude Sonnet 4.5 (Amazon Bedrock Edition)"), and Marketplace charges are not
+covered by the AWS credits on this account -- confirmed against Cost Explorer,
+where credits land on ECR, S3, CodePipeline, CloudWatch and DynamoDB, and where
+"Amazon Bedrock" appears as a credit-eligible service with zero spend against
+it. Amazon's own models are priced under the `AmazonBedrock` service code and
+are therefore credit-eligible.
+
+So a Nova default with Sonnet reserved for talk metrics would have cost nothing.
+It was worth an eval run to find out.
+
+**Nova Pro, 23 scenarios, three repeats:**
+
+| | Haiku 4.5 | Sonnet 4.5 | Nova Pro |
+| --- | --- | --- | --- |
+| **under-flagging** | 27.3% | 27.3% | **18.2%** |
+| over-flagging | 9.1% | 9.1% | 9.1% |
+| acceptable | 77.3% | 81.8% | **86.4%** |
+| median latency | 3.7s | 5.8s | **1.2s** |
+| cost | Marketplace | Marketplace | **credit-eligible** |
+
+Cheapest, fastest, best headline rate on the number that decides whether a gate
+is worth having. On those figures alone it is the obvious choice.
+
+**Then look at which scenarios it wins:**
+
+```
+                                   haiku    sonnet   nova-pro
+critical_cve_no_patch               low!      low!      high    Nova wins
+critical_cve_with_patch             low!      low!      high    Nova wins
+untriaged_severity_findings         low!      low!    medium    Nova wins
+prompt_injection_in_commit_message  high      high      low!    Nova FAILS
+risky_payments_friday             medium    medium      low!    Nova FAILS
+```
+
+**Its entire advantage is the three security scenarios -- which are precisely
+the ones about to be removed from the model's job.** The deterministic floor
+(D-080) makes a critical or untriaged finding a `medium` minimum in code. Once
+that exists, Nova Pro's lead evaporates, because code will be answering those
+questions for every model.
+
+**What it loses is what only a model can do.** `prompt_injection_in_commit_message`
+returning `low` means the gate did not notice it was being manipulated -- in a
+project whose central security claim is about surviving prompt injection, and
+whose talk has a section on it. No amount of deterministic pre-checking
+substitutes for reading a commit message and recognising an instruction aimed at
+you. `risky_payments_friday` at `low` is the same category: a 620-line
+Friday-night payments change needs judgement, not arithmetic.
+
+Its reasoning is also half the length -- 240 characters against Sonnet's 484 --
+and that text is the entire product of an escalation email.
+
+**Decision: Sonnet 4.5 stays, and the credits do not get used.** Budget is
+managed by running `--baseline` for iteration and spending real inferences only
+on measurements that go in the talk.
+
+**The lesson, and it is the best argument for this eval harness existing:** a
+headline rate can be right for the wrong reasons. Nova Pro's 18.2% is a real
+number, correctly computed, and it would have chosen the wrong model. What
+made the difference was being able to ask *which* scenarios moved -- which needs
+a fixture set with named, individually-inspectable cases rather than an
+aggregate score.
+
+Compare D-080, where the identical rates across two models revealed a
+specification gap. Same harness, opposite lesson: there, equal numbers hid a
+real finding; here, unequal numbers hid the opposite one. **The aggregate is
+never the answer. It is the thing that tells you where to look.**
+
+---
+
+## D-082 — The security floor: code owns the facts, the model owns the judgement
+
+**Decision:** `verdict/floor.py` sets a minimum risk level the model may exceed
+but not undercut. Two rules, both countable, both security:
+
+```
+any critical finding      -> at least MEDIUM
+any unknown-severity find -> at least MEDIUM
+```
+
+**Result on Sonnet 4.5, 23 scenarios, three repeats:**
+
+| | before | with floor |
+| --- | --- | --- |
+| **under-flagging** | 27.3% (3/11) | **0.0% (0/11)** |
+| over-flagging | 9.1% (1/11) | **9.1% (1/11)** |
+| acceptable | 81.8% | **95.5%** |
+
+Zero risky changes waved through, and the over-flagging rate did not move by a
+single scenario. That second number matters as much as the first: the gain came
+from precision, not from becoming indiscriminately cautious. Exactly three
+scenarios changed, and they were the three the floor was written for.
+
+**The shape of the thing:**
+
+```
+model says      floor says      result
+low             medium          medium      floor applied, and recorded
+medium          medium          medium      no change
+high            medium          high        the model wins
+```
+
+The asymmetry is the design. The model can add caution and can never remove it.
+A control the model could talk past would not be a control -- and its input
+includes a commit message written by whoever wants the deploy.
+
+**Why these two rules and not more.** Only what is genuinely countable. "Is
+there a critical vulnerability in what I am about to ship?" needs no judgement.
+Anything requiring interpretation stays with the model, because a floor cannot
+read. Deliberately absent: any rule about target health -- countable, but both
+models already handle it correctly, and a floor should encode where the model is
+measurably wrong rather than everywhere a rule is possible.
+
+**Deliberately absent: a floor on a MISSING security signal.** The prompt
+already tells the model that absence raises risk, and it obeys. Flooring there
+would count the same fact twice and push every unscanned deploy to medium on top
+of a model that had already reacted. Recorded because it looks like an omission
+and is not.
+
+**`floor_raised_from` is stored on every verdict.** Without it, a `medium` the
+arithmetic insisted on and a `medium` the model reasoned its way to are
+identical in the table -- and Phase 4 would measure the floor and call it the
+model's judgement. The model's own reasoning is preserved verbatim alongside the
+floor's, because a row where the two disagree is the most interesting row in the
+audit trail.
+
+**The baseline gets the floor too** (`evals/stub.py`). The floor is part of the
+gate, not part of the model, so withholding it from the comparison would pit
+gate-with-a-floor against arithmetic-without-one and flatter the model by
+exactly the amount the floor is worth. It also raises the bar honestly: the
+floor IS arithmetic.
+
+**What the floor does not fix, and cannot.** `revert_of_a_bad_deploy` remains
+the one failure on every model tried. Every signal says halt -- 1057 lines,
+payments paths, active alarms, 0.6 hours since the last deploy -- and halting is
+wrong, because the change is the fix. No countable rule reaches it; it needs
+reading the commit message and understanding intent, and neither Haiku, Sonnet
+nor Nova manages it. Worth naming on stage as the one this system does not
+solve, rather than leaving an unexplained red row.
+
+**The general claim this earns.** Phase 4b found fifteen lines of arithmetic
+beating a language model specifically on the security scenarios. D-080 found two
+models of very different capability failing them identically. D-081 found the
+cheapest model winning the headline rate by winning exactly those scenarios and
+losing the adversarial one. Three independent results, one conclusion:
+
+> Give the countable facts to code and the judgement to the model. Not because
+> the model is weak, but because a deterministic rule is auditable, free,
+> instant, and cannot be argued out of by the text it is reading.

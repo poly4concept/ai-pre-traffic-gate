@@ -303,7 +303,15 @@ resource "aws_lambda_function" "gate_stub" {
   # adds a Bedrock call inside this handler and model latency at high effort is
   # measured in seconds. Sizing it now means the timeout does not become the
   # thing that "broke" when the model arrives.
-  timeout     = 30
+  # 60s, not 30. The verdict model's read timeout is 20s and the client may make
+  # a second attempt after a fast failure, so the worst case inside the handler
+  # is ~30.6s (see the timeout budget in verdict/bedrock.py). A 30-second
+  # function timeout would cut that off mid-call and Lambda would report a
+  # timeout rather than the gate reporting a fail-closed verdict -- losing the
+  # audit record and the escalation on exactly the runs that most need them.
+  #
+  # Costs nothing: Lambda bills for milliseconds actually used, not the ceiling.
+  timeout     = 60
   memory_size = 256
 
   environment {

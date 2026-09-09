@@ -231,11 +231,11 @@ Each phase must work before the next begins.
 | 0 | Groundwork — scaffold, IaC skeleton, budget, Bedrock access | done |
 | 1 | Boring deploy path, zero AI — pipeline, canary, hardcoded halt | done |
 | 2 | Signal collectors — common interface, mocks first, then real | done |
-| 2.5 | Synthesised-real signals — controllable faults, genuine findings | 2.5a/b/d done; 2.5c (Inspector CVEs) deferred |
-| 3 | Verdict layer, shadow mode only | code complete, awaiting a live model call |
+| 2.5 | Synthesised-real signals — controllable faults, genuine findings | 2.5a/b/d done. 2.5c: Inspector enabled (~$0.91/mo), so the security signal returns a real answer; a branch pinning published CVEs is still outstanding |
+| 3 | Verdict layer, shadow mode only | **done.** Running live on Claude Haiku 4.5 |
 | 4 | Eval harness — ~20 labelled scenarios, over-flagging measurement | **done.** Haiku 4.5 measured at 81.0% acceptable / 30% under-flagging, losing to the arithmetic baseline (85.7% / 20%). Results and the reasoning in [evals/results/](evals/results/) |
-| 5 | Enforcement + escalation — executor, canary/halt, human override | 5.1 done (executor branches on risk); 5.2 done (SNS escalation; advisory mode now notifies); 5.3 done (per-execution human override, expires in 60 min). Enforcement switches still off |
-| 6 | Demo and talk assets | not started |
+| 5 | Enforcement + escalation — executor, canary/halt, human override | **done, and verified end to end.** A high-risk verdict halts the pipeline before the deploy stage, emails a human with the override command, and that override ships the change via canary. All three switches on |
+| 6 | Demo and talk assets | next — gated on choosing the verdict model, so the captured artifacts come from the model that ships |
 | 7 | Company environment hardening | not started |
 | 8 | Soak — simulated traffic, measured results | not started |
 

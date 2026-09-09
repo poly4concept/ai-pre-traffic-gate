@@ -148,7 +148,21 @@ variable "gate_decision" {
 variable "bedrock_model_id" {
   description = "Bedrock model or inference-profile ID used for the risk verdict."
   type        = string
-  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  # Sonnet 4.5, chosen on measured behaviour rather than reputation (D-080).
+  #
+  # Identical under-flagging (27.3%) and over-flagging (9.1%) to Haiku 4.5, and
+  # both models fail the SAME three security scenarios in the same direction --
+  # which is what proved that gap is a specification problem, not a capability
+  # one. Sonnet wins on everything else: exactly-the-ideal 77.3% vs 54.5%, and
+  # 100% stability across repeats against Haiku's 95.7%.
+  #
+  # ~3x the token cost, which is $0.012 per verdict against $0.004. At one
+  # inference per deploy that is not a consideration.
+  #
+  # Changing this means re-deriving the timeout budget in verdict/bedrock.py --
+  # Sonnet is 1.6x slower at the median and the old 8-second read timeout
+  # tripped on it.
+  default = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
   # Both forms are permitted, and the difference is not cosmetic:
   #

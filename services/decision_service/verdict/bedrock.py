@@ -52,6 +52,7 @@ from typing import Any
 
 from signals import SignalBundle
 
+from .floor import apply_floor
 from .prompt import PROMPT_VERSION, build_messages, system_blocks
 from .schema import VERDICT_FIELDS, VERDICT_TOOL_NAME, verdict_tool_config
 from .types import Verdict
@@ -72,17 +73,53 @@ TEMPERATURE = 0.0
 # stage, and because hitting the ceiling is a diagnosable event worth naming.
 MAX_TOKENS = 1024
 
-# Total wall-clock budget for all attempts, including backoff.
+# --- The timeout budget, and all four numbers move together -----------------
 #
-# A DEADLINE rather than an attempt count, because attempts are the wrong unit:
-# three fast throttles and three slow timeouts cost wildly different amounts of
-# the pipeline's time. The gate Lambda's timeout is 30s, so this leaves room for
-# collection, logging and the DynamoDB write around it.
-DEADLINE_SECONDS = 18.0
+# These were originally derived against Haiku 4.5 and had to be redone when the
+# verdict model changed to Sonnet 4.5 (D-080). The point of writing the
+# derivation down is that raising any ONE of them in isolation is a bug: the read
+# timeout nests inside the deadline, which nests inside the Lambda timeout, which
+# also has to cover signal collection and the audit write.
+#
+# MEASURED, not assumed. Same prompt, same scenario, us-east-1:
+#
+#   Haiku 4.5    median 3.66s   max 4.56s    0 of 32 calls over 8s
+#   Sonnet 4.5   median 5.76s   max 7.34s    2 of 69 calls over 8s
+#
+# So Sonnet runs about 1.6x slower at the median and its tail crosses the old
+# 8-second read timeout a few percent of the time. Left alone, roughly one deploy
+# in thirty would have burned a retry on a timeout, and a retry that also timed
+# out fails closed and halts a deploy that was never risky.
+#
+# Around the model call, from a real production invocation:
+#
+#   signal collection            3.6s
+#   audit write + escalate       0.5s
+#
+# Total wall-clock budget for all model attempts, including backoff. A DEADLINE
+# rather than an attempt count, because attempts are the wrong unit: three fast
+# throttles and three slow timeouts cost wildly different amounts of the
+# pipeline's time.
+DEADLINE_SECONDS = 35.0
 
 # Per-request timeouts handed to botocore.
-READ_TIMEOUT_SECONDS = 8
+#
+# 20s is roughly 3.5x Sonnet's median and well past anything observed, which is
+# the point -- a timeout should mean "something is wrong", not "the model was
+# having a slow afternoon". The old value of 8 was 1.4x Sonnet's median and
+# tripped on ordinary variance.
+READ_TIMEOUT_SECONDS = 20
 CONNECT_TIMEOUT_SECONDS = 3
+
+# WORST CASE, and it is worth being able to state it:
+#
+#   fast failure then slow one   6.0 + 0.5 + 20.0            = 26.5s
+#   then the predictive check    26.5 + 1.5 + 20 = 48 > 35   -> stops
+#   plus collection and write    26.5 + 3.6 + 0.5            = 30.6s
+#
+# against a 60-second Lambda timeout (gate_stub.tf). `tests/test_timeout_budget.py`
+# asserts that arithmetic so the next person to change one number is told about
+# the other three.
 
 # Errors where trying again might genuinely help.
 #
@@ -342,11 +379,16 @@ class BedrockVerdictClient:
 
         while True:
             attempts += 1
+            attempt_started = self._monotonic()
             try:
                 response = self._converse(bundle, correction)
                 raw = extract_tool_input(response)
                 last_raw = raw
                 verdict = parse_verdict(raw, model_id=self._model_id)
+                # Applied here rather than in the handler so that EVERY caller
+                # of the verdict client gets it -- including the eval harness,
+                # which would otherwise measure a gate that does not exist.
+                verdict = apply_floor(verdict, bundle)
 
             except Exception as exc:  # noqa: BLE001 - the whole point is that nothing escapes
                 last_kind, last_error, retryable = _classify(exc)
@@ -360,7 +402,27 @@ class BedrockVerdictClient:
 
                 delay = BACKOFF_SECONDS[min(attempts - 1, len(BACKOFF_SECONDS) - 1)]
                 elapsed = self._monotonic() - started
-                out_of_time = elapsed + delay >= self._deadline_seconds
+                # PREDICTIVE, and the estimate is the attempt that just failed.
+                #
+                # `elapsed + delay >= deadline` only asks whether there is time
+                # to START another attempt. It does not ask whether there is time
+                # to FINISH one, and the deadline cannot interrupt a call already
+                # in flight -- so a retry begun at 20.5s against a 35s deadline
+                # runs to 40.5s and overshoots every time it is hit.
+                #
+                # Budgeting the full READ_TIMEOUT for the next attempt fixes the
+                # overshoot and creates the opposite error: it refuses a retry
+                # that would have taken six seconds because it MIGHT have taken
+                # twenty, and refusing a retry means failing closed and halting a
+                # deploy that was never risky.
+                #
+                # So the estimate is what just happened. A schema violation
+                # returns in ~6s and predicts ~6s, leaving room to try again with
+                # a correction. A read timeout consumed 20s and predicts 20s,
+                # which correctly uses up the budget. The loop spends its
+                # remaining time on the failures that retrying can actually fix.
+                attempt_seconds = self._monotonic() - attempt_started
+                out_of_time = elapsed + delay + attempt_seconds >= self._deadline_seconds
                 out_of_attempts = attempts >= self._max_attempts
                 if not retryable or out_of_time or out_of_attempts:
                     break

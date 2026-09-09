@@ -43,7 +43,7 @@ carry one while a fail-closed verdict must not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 
@@ -134,6 +134,19 @@ class Verdict:
     # simply wrote short, and the audit record would be quietly lying.
     truncated_fields: tuple[str, ...] = ()
 
+    # Phase 5.5. Set when a deterministic floor raised this verdict above what
+    # the model said (verdict/floor.py), carrying the level the model actually
+    # returned and why the floor overrode it.
+    #
+    # Recorded rather than silently applied, for the same reason `source`
+    # exists: without it, a `medium` the code insisted on and a `medium` the
+    # model reasoned its way to are indistinguishable in the table -- and the
+    # whole point of the floor is that the model kept saying `low`. Phase 4
+    # would then measure the floor's arithmetic and call it the model's
+    # judgement.
+    floor_raised_from: RiskLevel | None = None
+    floor_reason: str = ""
+
     def __post_init__(self) -> None:
         if self.source is VerdictSource.MODEL and self.confidence is None:
             raise ValueError("a model-sourced verdict must carry the confidence the model reported")
@@ -144,6 +157,28 @@ class Verdict:
             )
         if not self.reasoning:
             raise ValueError("every verdict must record why it reached its conclusion")
+
+    def raised_to(self, level: RiskLevel, reason: str) -> Verdict:
+        """A copy at a higher risk level, recording what the model had said.
+
+        Refuses to lower, because a floor that could lower a verdict is not a
+        floor -- and because the one thing this must never do is give the model
+        a route to a safer-looking answer than it argued for.
+        """
+        if RISK_ORDER[level] <= RISK_ORDER[self.risk_level]:
+            raise ValueError(
+                f"a floor may only raise a verdict; {self.risk_level} -> {level} is not an increase"
+            )
+        return replace(
+            self,
+            risk_level=level,
+            floor_raised_from=self.risk_level,
+            floor_reason=reason,
+        )
+
+    @property
+    def was_raised_by_floor(self) -> bool:
+        return self.floor_raised_from is not None
 
     @property
     def action(self) -> Action:
@@ -188,4 +223,13 @@ class Verdict:
             "primary_concerns": list(self.primary_concerns),
             "model_id": self.model_id,
             "truncated_fields": list(self.truncated_fields),
+            # Phase 5.5. None on the ordinary path. When set, `risk_level` above
+            # is NOT what the model said -- it is what the evidence required, and
+            # this is the only field that says so. Measuring the gate's
+            # calibration without it would credit the model for a level that
+            # fifteen lines of arithmetic insisted on.
+            "floor_raised_from": (
+                str(self.floor_raised_from) if self.floor_raised_from is not None else None
+            ),
+            "floor_reason": self.floor_reason,
         }
