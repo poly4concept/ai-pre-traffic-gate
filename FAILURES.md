@@ -1922,3 +1922,63 @@ system assembled from managed services are not in the components. They are in
 the configuration that decides what the components do, which is spread across
 files, consoles, environment variables and out-of-band confirmations, and which
 nothing renders in one place. Build the thing that renders it.
+
+---
+
+## F-028 — The escalation email was correct and unusable
+
+**Symptom.** The first real enforcing-mode halt worked perfectly. The gate
+returned `high` at 0.95 confidence, stopped the pipeline before the Deploy stage
+ran, wrote the audit record, and published the escalation. The email arrived.
+
+And it was three things away from being actionable:
+
+1. **Threaded under the previous halt.** The subject was byte-identical to a
+   run 40 minutes earlier -- `[WOULD HALT] ai-pre-traffic-gate-demo-app -- high
+   risk` -- so Gmail grouped them. The new message appeared collapsed under an
+   old one, and the conversation still showed the OLD subject, which said
+   `[WOULD HALT]` while the body said the pipeline had been stopped.
+2. **The override command was hidden behind "show more".** It was the last
+   section of the body, and Gmail collapses trailing content.
+3. **The command was split across two lines by a trailing backslash**, so
+   copying it out of the collapsed block produced two fragments.
+
+**None of this is a bug in any component.** Every unit test passed. The subject
+was right, the body was right, the command was right, SNS delivered it. The
+message was correct and the *reading of it* was broken -- which is a category
+of defect that a test asserting `"TO OVERRIDE" in body` cannot see.
+
+> A notification is not delivered when it reaches the inbox. It is delivered
+> when the person can act on it.
+
+**Fixes, and the reasoning behind each:**
+
+| problem | fix | why that one |
+| --- | --- | --- |
+| threading | short commit SHA in the subject | mail clients group on sender + subject; uniqueness is the only reliable way out |
+| hidden command | move the override block above SIGNALS | escalations are read on a phone at speed; below the fold may as well not exist |
+| split command | one line, no `\` continuation | a backslash survives a terminal, not a client that reflows |
+| dash rules | indentation + `END OF COMMIT MESSAGE` | a long run of dashes reads as a signature separator, and content after one is a candidate for trimming |
+
+**The ordering question was a genuine trade.** The override block was last on
+the reasoning that a reader should understand *what* and *why* before being told
+*how to bypass*. That is sound in principle and wrong in a mail client. It now
+sits after the reasoning and the concerns -- enough to decide with -- and before
+the bulk of signals, commit text and IDs, which is reference material.
+
+**Why the tests did not catch it, and what the new ones assert.** The existing
+tests checked that each section was present. Presence was never the problem.
+The new tests assert *relationships*: that the override block appears before the
+signals section, that the command occupies one line, that no line looks like a
+signature separator, and that two different commits produce two different
+subjects.
+
+**The general shape, and it is the fourth time in this project.** F-016: the app
+failed safe and nothing could observe it failing. F-023: the fixture and the bug
+agreed. F-027: the system worked and the configuration was invisible. Now this:
+every component behaved and the artifact they produced could not be used.
+
+Testing a component tells you the component works. It tells you nothing about
+whether the thing it produces survives its destination -- a mail client, a
+console that truncates a UUID, a log line somebody skims. **The output of a
+system is not the same as its behaviour, and only one of them has tests.**

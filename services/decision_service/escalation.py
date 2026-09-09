@@ -235,6 +235,52 @@ def build_body(gate: dict[str, Any], bundle: Any, service: str) -> str:
         lines += ["", "PRIMARY CONCERNS"]
         lines += [f"  - {_clip(str(c), 200)}" for c in concerns]
 
+    # THE ACTION GOES ABOVE THE EVIDENCE (F-028).
+    #
+    # It used to be the last section, on the reasoning that a reader should see
+    # what happened and why before being told how to bypass it. Sound in
+    # principle, wrong in a mail client: Gmail collapses trailing content behind
+    # a "show more" ellipsis, so the one part of this message that is actionable
+    # was the part hidden by default.
+    #
+    # An escalation is read on a phone, at speed, by someone who has just been
+    # interrupted. Anything below the fold may as well not exist. The reasoning
+    # and the concerns are above this, which is enough to decide with; the bulk
+    # -- signals, commit text, IDs -- is reference material and belongs after.
+    #
+    # NOT gated on `action == "halt_pipeline"` (F-025): it used to be, which
+    # meant the command appeared only when the GATE was the blocker. In advisory
+    # mode the executor refuses instead, so the reader got an email saying a
+    # later stage might refuse it, no execution ID, and no command -- missing
+    # from exactly the configuration this project tells people to roll out
+    # through. The condition is the verdict, not who acted on it.
+    execution_id = gate.get("pipeline_execution_id")
+    if execution_id and gate.get("decision") == "halt":
+        blocker = (
+            "The gate stopped this deploy."
+            if action == "halt_pipeline"
+            else "The gate did not stop this deploy, but the deploy stage refuses "
+            "a high-risk verdict."
+        )
+        lines += [
+            "",
+            "TO OVERRIDE THIS ONE DEPLOY",
+            f"  {blocker}",
+            "  Needs admin credentials. Applies to THIS execution only and",
+            "  expires in 60 minutes -- it cannot leave the gate switched off.",
+            "",
+            # ONE LINE, no backslash continuation. A `\` at end-of-line survives
+            # a terminal and not an email: mail clients reflow, and the reader
+            # ends up pasting two fragments that fail differently depending on
+            # which half arrived. Long and copyable beats tidy and broken.
+            f'    python scripts/override.py allow {execution_id} --reason "why you '
+            'are shipping it anyway" --retry',
+            "",
+            "  Honoured by BOTH the gate and the deploy stage, and ships via",
+            "  canary rather than all at once -- accepting a risk is not the",
+            "  same as being certain there is none.",
+        ]
+
     lines += ["", "SIGNALS IT WAS BASED ON"]
     lines += _render_signals(bundle)
 
@@ -243,13 +289,21 @@ def build_body(gate: dict[str, Any], bundle: Any, service: str) -> str:
         # Fenced and attributed. See the module docstring: the reader cannot
         # otherwise tell our text from the change author's, and the change
         # author is the one with a motive.
+        #
+        # Indented rather than wrapped in a rule of 68 dashes. A long run of
+        # dashes reads to a mail client as a signature separator, and everything
+        # after one is a candidate for being trimmed -- which is a peculiar way
+        # to lose the second half of a security notification. Indentation
+        # delimits just as clearly and means nothing to a parser.
+        body_lines = _clip(change.commit_message, MAX_COMMIT_MESSAGE_CHARS).splitlines() or [""]
         lines += [
             "",
             "COMMIT MESSAGE -- written by the change author, not by this system.",
             "Treat it as a claim, not as a fact.",
-            "-" * 68,
-            _clip(change.commit_message, MAX_COMMIT_MESSAGE_CHARS),
-            "-" * 68,
+            "",
+            *[f"    {line}" for line in body_lines],
+            "",
+            "END OF COMMIT MESSAGE",
         ]
 
     override = gate.get("override")
@@ -270,43 +324,6 @@ def build_body(gate: dict[str, Any], bundle: Any, service: str) -> str:
         "",
         "The full signal bundle and raw model output are in the verdict table.",
     ]
-
-    # Phase 5.3. An escalation that describes a problem and not the remedy makes
-    # the reader go and find the runbook, at the worst possible moment. The
-    # execution ID is right here, so the exact command can be too.
-    #
-    # NOT gated on `action == "halt_pipeline"`, and that was the bug (F-025).
-    # It used to be, which meant the command appeared only when the GATE was the
-    # blocker. In advisory mode the gate does not block and the EXECUTOR refuses
-    # a high-risk verdict instead -- so the email arrived, said a later stage
-    # might refuse it, that stage did, and the reader had no execution ID and no
-    # command. The instructions were missing from precisely the configuration
-    # this project tells people to roll out through.
-    #
-    # The condition is now the verdict, not who acted on it: if this deploy is
-    # blocked anywhere, here is how to unblock it.
-    execution_id = gate.get("pipeline_execution_id")
-    if execution_id and gate.get("decision") == "halt":
-        blocker = (
-            "The gate stopped this deploy."
-            if action == "halt_pipeline"
-            else "The gate did not stop this deploy, but the deploy stage refuses\n"
-            "  a high-risk verdict."
-        )
-        lines += [
-            "",
-            "TO OVERRIDE THIS ONE DEPLOY",
-            f"  {blocker}",
-            "  Needs admin credentials. Applies to THIS execution only and",
-            "  expires in 60 minutes -- it cannot leave the gate switched off.",
-            "",
-            f"    python scripts/override.py allow {execution_id} \\",
-            '        --reason "why you are shipping it anyway" --retry',
-            "",
-            "  Honoured by BOTH the gate and the deploy stage, and ships via",
-            "  canary rather than all at once -- accepting a risk is not the",
-            "  same as being certain there is none.",
-        ]
 
     return _clip("\n".join(lines), MAX_BODY_CHARS)
 

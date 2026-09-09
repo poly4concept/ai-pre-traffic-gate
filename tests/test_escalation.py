@@ -349,3 +349,103 @@ def test_a_fail_closed_verdict_escalates_without_a_special_case(monkeypatch):
     handler = load(monkeypatch, "enforcing")
 
     assert handler.should_escalate(decision="halt", mode="enforcing") is True
+
+
+# --- Surviving a mail client ----------------------------------------------
+#
+# Phase 5.4e. The first real halt email arrived correct in every respect that a
+# unit test had checked, and unusable: threaded under the previous halt because
+# the subject was byte-identical, with the override command hidden behind
+# Gmail's "show more" because it was the last section.
+#
+# A notification is not delivered when it reaches the inbox. It is delivered
+# when the person can act on it.
+
+
+def halted(**overrides):
+    base = {
+        "action_taken": "halt_pipeline",
+        "decision": "halt",
+        "pipeline_execution_id": "845c7403-2cdf-417e-8658-8675decec3c2",
+        "commit_sha": "dbd4920016024f8a9c1e5b7d3f2a8e6c4b0d9a1f",
+    }
+    return gate(**{**base, **overrides})
+
+
+def test_the_subject_is_unique_per_commit():
+    """THE THREADING FIX (F-027).
+
+    Mail clients group on sender plus subject. Two halts with identical
+    subjects arrive as one conversation, the second collapsed under the first
+    and looking like something already read -- which for a message whose entire
+    job is to interrupt somebody is total failure.
+    """
+    first = escalation.build_subject(halted(commit_sha="aaaaaaaa1111"), "demo")
+    second = escalation.build_subject(halted(commit_sha="bbbbbbbb2222"), "demo")
+
+    assert first != second
+    assert "aaaaaaaa" in first
+    assert "bbbbbbbb" in second
+
+
+def test_the_subject_still_leads_with_the_state():
+    """The SHA is for uniqueness, not for reading. A mail list shows the first
+    forty characters and the state is the only part that changes what the
+    reader does next."""
+    assert escalation.build_subject(halted(), "demo").startswith("[HALTED]")
+
+
+def test_the_override_command_appears_before_the_bulk_of_the_email():
+    """THE "SHOW MORE" FIX (F-028).
+
+    Gmail collapses trailing content. The override block used to be last, so
+    the one actionable part of the message was the part hidden by default.
+    Reasoning and concerns stay above it -- enough to decide with -- and the
+    reference material moves below.
+    """
+    body = escalation.build_body(halted(), bundle_for("risky_payments_friday"), "demo")
+
+    override_at = body.index("TO OVERRIDE THIS ONE DEPLOY")
+    signals_at = body.index("SIGNALS IT WAS BASED ON")
+    investigate_at = body.index("TO INVESTIGATE")
+
+    assert body.index("WHY") < override_at, "the reader should see why before how to bypass"
+    assert override_at < signals_at < investigate_at
+
+
+def test_the_override_command_is_one_copyable_line():
+    """A trailing backslash survives a terminal and not an email.
+
+    Mail clients reflow, so a continuation leaves the reader pasting two
+    fragments that fail differently depending on which half arrived.
+    """
+    body = escalation.build_body(halted(), bundle_for("risky_payments_friday"), "demo")
+    command = next(ln for ln in body.splitlines() if "scripts/override.py allow" in ln)
+
+    assert "\\" not in command
+    assert "--reason" in command and "--retry" in command
+    assert "845c7403-2cdf-417e-8658-8675decec3c2" in command
+
+
+def test_no_line_looks_like_a_signature_separator():
+    """A long run of dashes reads to a mail client as a signature separator,
+    and everything after one is a candidate for trimming -- a peculiar way to
+    lose the second half of a security notification."""
+    body = escalation.build_body(halted(), bundle_for("prompt_injection_in_commit_message"), "demo")
+
+    for line in body.splitlines():
+        assert not line.strip().startswith("----"), f"dash rule would invite trimming: {line!r}"
+
+
+def test_the_commit_message_is_still_unmistakably_fenced():
+    """Removing the dashes must not remove the boundary. The reader still has
+    to be able to tell our text from the change author's."""
+    body = escalation.build_body(halted(), bundle_for("prompt_injection_in_commit_message"), "demo")
+
+    assert "written by the change author, not by this system" in body
+    assert "END OF COMMIT MESSAGE" in body
+    start = body.index("Treat it as a claim, not as a fact.")
+    end = body.index("END OF COMMIT MESSAGE")
+    quoted = body[start:end]
+    # Indented, so the boundary survives without a delimiter a parser cares about.
+    assert any(ln.startswith("    ") and ln.strip() for ln in quoted.splitlines())
