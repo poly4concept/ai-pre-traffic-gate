@@ -1,6 +1,6 @@
 # Model comparison
 
-_Generated 2026-09-09 16:52 UTC by `scripts/capture_artifacts.py`._
+_Generated 2026-09-09 19:33 UTC by `scripts/capture_artifacts.py`._
 
 Same 23 scenarios, three repeats each, temperature 0, identical prompt.
 **Before the deterministic floor** -- see `floor-effect.md` for after.

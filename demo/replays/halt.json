@@ -1,28 +1,28 @@
 {
-  "captured_at": "2026-09-09T12:06:15.498937+00:00",
-  "commit_sha": "11a8dba84a01919679478c18379bd352d98ed7e6",
+  "captured_at": "2026-09-09T17:04:18.833891+00:00",
+  "commit_sha": "ccb5de72edac6a95b5ccbf847d64db1f11b98e59",
   "mode": "enforcing",
   "action_taken": "halt_pipeline",
-  "verdict_id": "b8378efe-236a-4251-a003-26b4ae564fbf",
-  "pipeline_execution_id": "d3ec7158-0240-476b-b0b8-acddbe8d7984",
+  "verdict_id": "4d62fc7d-9de1-4db7-9d70-93e2edafa178",
+  "pipeline_execution_id": "649fa11d-39bf-413b-a088-7df91f18db6c",
   "risk_level": "high",
-  "reasoning": "The target service is currently in an unhealthy state with a 50.7% error rate over 381 invocations and an active alarm for error rate threshold breach (100% errors observed at 11:55 UTC). Deploying any change\u2014even a removal of demo code\u2014during an active production alarm is unwise without human review. The rapid deployment cadence (5 deploys in 24 hours, last one 26 minutes ago) combined with the current alarm state suggests the service is unstable. While the change itself appears to be a safe cleanup (648 lines removed from demo/synthetic paths with no additions), the timing and target heal...",
-  "confidence": "0.92",
+  "reasoning": "The target service shows a 14% error rate over the last 60 minutes, which is concerning even with only 86 invocations - these are real observed failures, not sampling noise. While alarms are not currently firing, the error rate alarm threshold is 5% and recent datapoints show 0%, suggesting the high error rate may be very recent or intermittent. This is a large change (2263 lines added across 13 files) being deployed to an unhealthy service during rapid deployment activity (5 deploys in 24 hours). The combination of current service instability and a substantial change warrants human review.",
+  "confidence": "0.85",
   "source": "model",
   "floor_raised_from": "",
   "primary_concerns": [
-    "Service is currently in ALARM state with 50.7% error rate and recent 100% error spike",
-    "Active error-rate alarm indicates production instability",
-    "Rapid deployment cadence (5 in 24h) during service degradation increases risk of cascading failures",
-    "Deploying during active alarms without human verification violates safe deployment practices"
+    "Target service has 14% error rate with 12 observed failures in 86 requests over last 60 minutes",
+    "Large change adding 2263 lines across 13 files",
+    "Rapid deployment cadence with 5 deploys in last 24 hours",
+    "P99 latency at 4853ms is elevated though alarm threshold is 2000ms and not firing"
   ],
-  "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
   "prompt_version": "2026-09-08.1",
-  "latency_ms": "3814",
-  "input_tokens": "3019",
+  "latency_ms": "6824",
+  "input_tokens": "3106",
   "health": {
-    "error_rate_pct": "50.656167979002625",
-    "invocations_last_hour": "381",
-    "alarms_firing": 1
+    "error_rate_pct": "13.953488372093023",
+    "invocations_last_hour": "86",
+    "alarms_firing": 0
   }
 }

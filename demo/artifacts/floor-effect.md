@@ -1,6 +1,6 @@
 # The deterministic security floor
 
-_Generated 2026-09-09 16:52 UTC by `scripts/capture_artifacts.py`._
+_Generated 2026-09-09 19:33 UTC by `scripts/capture_artifacts.py`._
 
 Two rules, both countable, both security:
 

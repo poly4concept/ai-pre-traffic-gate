@@ -1,6 +1,6 @@
 # Gate history -- what it did to real deploys
 
-_Generated 2026-09-09 16:52 UTC by `scripts/gate_history.py`._
+_Generated 2026-09-09 19:33 UTC by `scripts/gate_history.py`._
 
 This is the REAL-WORLD rate, as distinct from the eval's fixture-based one.
 A gate that scores well on 23 fixtures and halts half of your actual
@@ -11,33 +11,34 @@ deploys is not deployable, and only this number can tell you that.
 GATE HISTORY -- ai-pre-traffic-gate-demo-app
 ==========================================================================
 
-  22 verdicts from real deploys, 2026-09-06 to 2026-09-09
+  23 verdicts from real deploys, 2026-09-06 to 2026-09-09
   excluding 9 manual `aws lambda invoke` test(s) --
   no pipeline execution, so not a deploy. They fail closed to HIGH by
   design, so counting them would skew the rate upward.
 
   WOULD HAVE HALTED
-    10/22  (45%)
-    actually halted: 3
+    11/23  (48%)
+    actually halted: 4
 
   RISK DISTRIBUTION
     low         4  #####
-    medium      8  ###########
-    high       10  ##############
+    medium      8  ##########
+    high       11  ##############
 
   VERDICT SOURCE
-    model            22
+    model            23
 
   CONTEXT
-    modes:           {'enforcing': 6, 'advisory': 6, 'shadow': 10}
-    prompt versions: {'2026-09-08.1': 6, '2026-09-02.3': 16}
+    modes:           {'enforcing': 7, 'advisory': 6, 'shadow': 10}
+    prompt versions: {'2026-09-08.1': 7, '2026-09-02.3': 16}
     overridden:      2
     median latency:  3587ms
-    input tokens:    62,367
+    input tokens:    65,473
 
   THE DECISIONS
     when              risk    source       mode      commit
     ----------------- ------- ------------ --------- ------------
+  ! 2026-09-09T17:04  high    model        enforcing ccb5de72edac
   ! 2026-09-09T12:09  high    model        enforcing 11a8dba84a01
   ! 2026-09-09T12:06  high    model        enforcing 11a8dba84a01
   ! 2026-09-09T12:01  high    model        enforcing ce1d6eb564a4
@@ -57,7 +58,6 @@ GATE HISTORY -- ai-pre-traffic-gate-demo-app
     2026-09-06T15:40  medium  model        shadow    0448f3b1d754
     2026-09-06T15:34  medium  model        shadow    1c8c2916facf
     2026-09-06T14:52  low     model        shadow    d527df79dbfb
-    2026-09-06T14:46  medium  model        shadow    218f61e1ebac
 
   READING THIS
     A halt rate this high will not survive contact with colleagues.
