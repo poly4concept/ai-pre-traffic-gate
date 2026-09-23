@@ -524,5 +524,17 @@ def build_messages(bundle: SignalBundle, correction: str | None = None) -> list[
     """
     content: list[dict[str, Any]] = [{"text": render_bundle(bundle)}]
     if correction:
-        content.append({"text": f"\n<correction>\n{_escape(correction)}\n</correction>"})
+        content.append({"text": render_correction(correction)})
     return [{"role": "user", "content": content}]
+
+
+def render_correction(correction: str) -> str:
+    """The retry instruction, wrapped the way the model is told to expect it.
+
+    Split out of `build_messages` so a non-Converse provider builds the SAME
+    text rather than its own near-identical version. That matters more than it
+    looks: the eval compares models against each other, and a comparison where
+    each provider was asked a subtly different question measures the prompts,
+    not the models. One renderer, one question, whatever the transport.
+    """
+    return f"\n<correction>\n{_escape(correction)}\n</correction>"

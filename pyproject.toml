@@ -22,6 +22,13 @@ dev = [
     "ruff>=0.8.0",
     "moto>=5.0.0",
 ]
+# Only the eval harness talks to a second provider. Deliberately NOT a runtime
+# dependency: the gate never calls Gemini, and shipping a provider SDK the
+# running system cannot reach would add cold-start weight to the one component
+# where it is a real cost. See services/decision_service/verdict/gemini.py.
+evals = [
+    "google-genai>=2.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

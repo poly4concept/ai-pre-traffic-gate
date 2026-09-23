@@ -2833,3 +2833,92 @@ losing the adversarial one. Three independent results, one conclusion:
 > Give the countable facts to code and the judgement to the model. Not because
 > the model is weak, but because a deterministic rule is auditable, free,
 > instant, and cannot be argued out of by the text it is reading.
+
+---
+
+## D-083 — A transport seam, so a second provider is a class and not a client
+
+**Decision:** split `bedrock.py` into `client.py` (provider-neutral) and a
+`Transport` that each provider implements. `BedrockVerdictClient` keeps its
+exact name, constructor and behaviour; it is now the shared client wired to a
+`BedrockTransport`.
+
+**Why, and the number is the argument.** `get_verdict()` is 122 lines. When a
+second provider was added, exactly four of them turned out to be about Bedrock:
+
+| | |
+| --- | --- |
+| the API call | provider-specific |
+| pulling the tool arguments out | provider-specific |
+| mapping an error to "retryable" | provider-specific |
+| token and latency field names | provider-specific |
+| the required-signals short circuit | **not** |
+| the retry loop and its backoff | **not** |
+| the repair-retry correction | **not** |
+| the predictive deadline check | **not** |
+| schema validation | **not** |
+| the security floor | **not** |
+| failing closed, nine distinct ways | **not** |
+
+The four are transport. The rest is the gate's actual behaviour, and it is the
+part that took longest to get right — the deadline check alone was rewritten
+twice (F-026's neighbour, and the observed-duration fix). Copying it per
+provider would put the fail-closed guarantee in two places, with the second copy
+getting less scrutiny precisely because it was written second.
+
+**What this is not.** It is not a claim that the gate is multi-cloud. The
+deployed gate calls Bedrock and only Bedrock; `gemini.py` is reachable from the
+eval harness and from nothing else. "Model agnostic" is a claim about an
+abstraction, and the honest way to support it is to run a second provider
+through the same abstraction rather than to assert it in a README.
+
+**The cost of being wrong here** is one indirection in the hottest-read module
+in the project. Judged worth it because the alternative was discovered
+empirically: writing the Gemini client began as a copy of the Bedrock one, and
+the copy was 180 lines of which 150 were identical.
+
+---
+
+## D-084 — Gemini Flash-Lite, chosen by quota rather than by capability
+
+**Decision:** `gemini-3.5-flash-lite` for the fourth eval column, on a Google AI
+Studio free-tier key. No billing account.
+
+**Why not a Pro model, which would be the fairer fight.** Pro-series models moved
+to paid-only in April 2026. The free tier is Flash and Flash-Lite, and the two
+are not interchangeable for this purpose:
+
+| | free requests/day | a full run needs |
+| --- | --- | --- |
+| Flash | ~20 | 66 |
+| Flash-Lite | ~500 | 66 |
+
+22 scenarios × 3 repeats = 66 calls. On Flash that is a four-day eval. Flash-Lite
+is the only free model that finishes one in a sitting.
+
+**Why this is not the compromise it looks like.** The claim being tested is
+"specification gap, not capability gap" (D-080), and it currently rests on two
+Anthropic models plus one Amazon model. What strengthens it is a model trained by
+someone else entirely, not a larger model from the same pool. If Flash-Lite
+misses the same three security scenarios in the same direction, that is four
+models across three vendors with one blind spot, and the claim stops being
+arguable. If it beats Haiku and Sonnet, that is a better result still — the
+arithmetic baseline already does.
+
+The results table must label it as a small model. A reader who assumes the Gemini
+column is Pro-class would draw a conclusion the data does not support, and that
+would be our fault rather than theirs.
+
+**Escape hatch, costed.** A full 3-repeat run is ~187K input and ~15K output
+tokens. At Gemini 3.1 Pro's $2/$12 per million that is about **$0.55**, well
+inside the project's $4 ceiling, and prompts of ~1,300 tokens stay far below the
+200K long-context surcharge. So if Flash-Lite's result is ambiguous, one Pro run
+is affordable on a temporarily-attached card. Flash-Lite first regardless: it
+proves the transport works before any money is involved, which is the same
+ordering Phase 1 used on the deploy path.
+
+**Free-tier mechanics that became code.** The per-minute ceiling is the binding
+constraint, not the daily one, so `GeminiTransport` paces calls at 4.5-second
+intervals and the eval runs with a 120-second deadline instead of the gate's 35.
+Both are eval-only: the gate's budget is set by a pipeline stage waiting on it,
+and an eval is not inside one.

@@ -653,3 +653,43 @@ def test_the_report_names_the_refused_scenarios():
     assert "UNMEASURED" in text
     assert "critical_cve_no_patch" in text
     assert "invalid_verdict:primary_concerns" in text
+
+
+def test_a_single_pass_reports_stability_as_unmeasured_not_as_perfect():
+    """THE TRAP THIS PROJECT KEEPS WALKING INTO, found in the tool built to
+    measure it.
+
+    `is_stable` asks whether every repeat returned the same level. With one
+    repeat that is trivially true for every scenario, so the report printed
+    `stable across repeats 100.0% (23/23)` -- the most reassuring figure on the
+    page, computed from a comparison that never happened. A reader has no way to
+    tell it apart from a genuine three-pass result.
+
+    Same rule as `_rate([0, 0]) -> "n/a"`: no denominator, no number.
+    """
+    lab = label(scenario="safe_dependency_bump", kind=Kind.BENIGN, acceptable=frozenset({LOW}))
+    run = EvalRun(
+        results=(ScenarioResult(label=lab, attempts=(attempt(LOW),)),),
+        repeats=1,
+        model_id="test",
+    )
+
+    text = format_run(run)
+
+    assert "stable across repeats    n/a" in text
+    assert "--repeats" in text, "the reader should be told how to get the number"
+    assert "100.0%   (1/1)" not in text
+
+
+def test_repeated_runs_still_report_a_real_stability_figure():
+    """The guard must not swallow the number it exists to protect."""
+    lab = label(scenario="safe_dependency_bump", kind=Kind.BENIGN, acceptable=frozenset({LOW}))
+    run = EvalRun(
+        results=(ScenarioResult(label=lab, attempts=(attempt(LOW), attempt(LOW))),),
+        repeats=2,
+        model_id="test",
+    )
+
+    text = format_run(run)
+
+    assert "stable across repeats  100.0%   (1/1)" in text

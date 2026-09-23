@@ -142,15 +142,22 @@ def test_connect_timeout_is_short_because_a_refused_connection_is_immediate():
 
 
 def test_the_documented_budget_matches_the_constants():
-    """The derivation in bedrock.py's header is the explanation people will
-    read. If it drifts from the code it becomes actively misleading."""
-    source = (ROOT / "services" / "decision_service" / "verdict" / "bedrock.py").read_text(
-        encoding="utf-8"
+    """The derivation in the verdict package's headers is the explanation people
+    will read. If it drifts from the code it becomes actively misleading.
+
+    Read across both modules on purpose. The budget is ONE budget, and the
+    provider split (Phase 4c) put half its constants in `client.py` and half in
+    `bedrock.py` -- the deadline and attempt ceiling are provider-neutral, the
+    socket timeouts are botocore's. Scanning only one file would let the other
+    half drift silently, which is the exact failure this test exists to catch.
+    """
+    verdict_dir = ROOT / "services" / "decision_service" / "verdict"
+    source = "\n".join(
+        (verdict_dir / name).read_text(encoding="utf-8") for name in ("client.py", "bedrock.py")
     )
 
     assert f"DEADLINE_SECONDS = {DEADLINE_SECONDS}" in source
     assert f"READ_TIMEOUT_SECONDS = {READ_TIMEOUT_SECONDS}" in source
     assert f"{lambda_timeout()}-second Lambda timeout" in source, (
-        "bedrock.py's budget comment names a different Lambda timeout than "
-        "gate_stub.tf actually sets"
+        "the budget comment names a different Lambda timeout than gate_stub.tf actually sets"
     )

@@ -1,0 +1,230 @@
+{
+  "model_id": "gemini-3.5-flash-lite",
+  "repeats": 7,
+  "over_flagging": [
+    0,
+    2
+  ],
+  "under_flagging": [
+    0,
+    4
+  ],
+  "under_flagging_unaided": [
+    2,
+    4
+  ],
+  "passes": [
+    6,
+    6
+  ],
+  "stability": [
+    1,
+    6
+  ],
+  "tokens": [
+    90755,
+    7448
+  ],
+  "fail_closed_attempts": 0,
+  "pair_violations": [],
+  "scenarios": [
+    {
+      "scenario": "untriaged_severity_findings",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low",
+        "low",
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.6666666666666666,
+      "reasoning": "The change is a routine dependency version bump (requests from 2.31.0 to 2.32.3) by dependabot involving only 1 file and 2 lines changed. The target service is healthy with 42,000 invocations in the last 60 minutes, a very low error rate of 0.02%, and no active alarms. The pre-existing unscored security finding is in an unrated transitive dependency with no fix available and does not block this low-risk update."
+    },
+    {
+      "scenario": "critical_cve_no_patch",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "high"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": false,
+      "unaided_levels": [
+        "low",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "high"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.5,
+      "reasoning": "The change is a routine, small dependency update (Bump requests from 2.31.0 to 2.32.3) with healthy target metrics (42,000 invocations, 0.02% error rate, 0 alarms). However, there is a pre-existing critical security finding regarding an unpatched authentication bypass in abandoned-lib (abandoned-lib 3.0.1; NO FIX AVAILABLE). While this vulnerability is pre-existing rather than introduced by this specific PR, the presence of a critical vulnerability warrants attention, though the change itself is low risk and standard. A low risk assessment is appropriate here as the dependency bump does not..."
+    },
+    {
+      "scenario": "critical_cve_with_patch",
+      "kind": "risky",
+      "levels": [
+        "high",
+        "medium",
+        "high",
+        "medium",
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": false,
+      "unaided_levels": [
+        "high",
+        "medium",
+        "high",
+        "medium",
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.2,
+      "reasoning": "The change itself is a minor dependency bump (requests 2.31.0 to 2.32.3) with high traffic health metrics indicating an OK target state (0.02% error rate, 42k invocations). However, security_findings report a pre-existing critical vulnerability (Remote code execution in example-lib 1.2.0) on the target service. Because security findings describe the currently deployed version and this change does not address that vulnerability, deploying now carries critical pre-existing risk that warrants human review."
+    },
+    {
+      "scenario": "low_traffic_high_errors",
+      "kind": "risky",
+      "levels": [
+        "high",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "high",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": false,
+      "unaided_levels": [
+        "high",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "high",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.8,
+      "reasoning": "Although the change itself is a tiny, routine dependency bump (bump requests from 2.31.0 to 2.32.3) with no security findings and good provenance, the target health metrics show an error rate of 38.5% and a p99 latency of 4921ms. Even though the invocation count is small (91), deploying to a service showing such degraded performance metrics is risky and warrants a human check or blocking until health is restored."
+    },
+    {
+      "scenario": "security_scanning_switched_off",
+      "kind": "absent_signal",
+      "levels": [
+        "medium",
+        "low",
+        "low",
+        "low",
+        "medium",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": false,
+      "unaided_levels": [
+        "medium",
+        "low",
+        "low",
+        "low",
+        "medium",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.6,
+      "reasoning": "The change is a routine dependency version bump (requests 2.31.0 to 2.32.3) with minimal lines changed (1 added, 1 removed). Target health is strong with 42,000 invocations, a very low error rate of 0.02%, and zero alarms in the last 60 minutes. However, security findings were skipped, which represents a missing signal that prevents full visibility into potential vulnerabilities in the dependency. This missing signal warrants a medium risk assessment to ensure cautious exposure, though the change itself is very small and low-risk."
+    },
+    {
+      "scenario": "small_auth_change_business_hours",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low",
+        "low",
+        "low",
+        "medium",
+        "medium"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": false,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low",
+        "low",
+        "low",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "The change is small (6 lines across 1 file) and modifies session token TTL in services/auth/tokens.py. The target service is healthy with 42,000 invocations in the last 60 minutes, a very low error rate of 0.02%, and no active alarms. Zero security findings were reported. Modifying authentication parameters carries minor inherent risk, warranting careful observation, but all metrics indicate a stable environment and a routine, low-risk change."
+    }
+  ]
+}

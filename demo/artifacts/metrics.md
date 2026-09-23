@@ -1,6 +1,6 @@
 # Metrics -- every number, and where it came from
 
-_Generated 2026-09-09 19:43 UTC by `scripts/capture_artifacts.py`._
+_Generated 2026-09-23 19:02 UTC by `scripts/capture_artifacts.py`._
 
 ## The two rates (fixture set, 23 scenarios, 3 repeats)
 
@@ -16,44 +16,14 @@ _Source: `evals/results/*.json`._
 
 ## The build
 
-- tests: **818** across 27 files
-- architectural decisions: **82**
-- recorded failures: **28**
+- tests: **854** across 28 files
+- architectural decisions: **84**
+- recorded failures: **30**
 
 _Source: `DECISIONS.md`, `FAILURES.md`, `pytest --collect-only`._
 
-## Real deploys (not fixtures)
+## Live figures
 
-- verdicts from real pipeline executions: **25**
-- actually halted: **5**
-- risk distribution: high 12, low 5, medium 8
-
-This is the number that decides whether the gate is deployable. A gate that
-scores well on 23 fixtures and halts half your real deploys is not.
-
-## Latency and size
-
-- median verdict latency: **3609ms**
-- slowest observed: 6824ms
-- mean input tokens: 2,864
-
-_Source: the `ai-pre-traffic-gate-verdicts` table, 25 real executions._
-
-## Cost
-
-Last 90 days, gross:
-
-| service | spend |
-| --- | --- |
-| Claude Haiku 4.5 (Amazon Bedrock Edition) | $1.5923 |
-| Amazon Simple Storage Service | $0.0153 |
-| Amazon DynamoDB | $0.0000 |
-| AWS Data Transfer | $-0.0000 |
-| **total** | **$1.6076** |
-
-Bedrock's Anthropic models bill as an AWS **Marketplace** purchase
-(`USE1-MP:` usage types), which most AWS credits exclude -- so model spend
-is real money while the rest of the stack is largely credited (D-081).
-
-_Source: Cost Explorer, `GetCostAndUsage` grouped by SERVICE._
+_Not generated: `--offline`. Re-run without it for latency, real-deploy
+rates and spend._
 

@@ -66,6 +66,22 @@ class Attempt:
     input_tokens: int | None
     output_tokens: int | None
     latency_ms: int | None
+    # What the MODEL said, before the deterministic floor raised it -- None when
+    # the floor did not fire.
+    #
+    # Recorded because otherwise the floor's contribution is invisible in a
+    # result file, and the only way to size it is to run the whole set twice:
+    # once before the floor existed and once after. That is how D-082 was
+    # measured, and it is not repeatable -- there is no switch to turn the floor
+    # off, deliberately, because a floor the eval can bypass is measuring a gate
+    # that does not ship. Carrying the pre-floor level makes both numbers
+    # readable from one run.
+    floor_raised_from: RiskLevel | None = None
+
+    @property
+    def unaided_level(self) -> RiskLevel:
+        """What the model said on its own."""
+        return self.floor_raised_from or self.risk_level
 
     @property
     def reached_the_model(self) -> bool:
@@ -107,6 +123,24 @@ class ScenarioResult:
         top = max(counts.values())
         tied = [level for level, n in counts.items() if n == top]
         return max(tied, key=lambda level: RISK_ORDER[level])
+
+    @property
+    def unaided_levels(self) -> tuple[RiskLevel, ...]:
+        """The same answers with the floor's contribution removed."""
+        return tuple(a.unaided_level for a in self.attempts)
+
+    @property
+    def was_floored(self) -> bool:
+        return any(a.floor_raised_from is not None for a in self.attempts)
+
+    @property
+    def passed_unaided(self) -> bool:
+        """Would this have passed without the floor?
+
+        Same all-attempts rule as `passed`: four acceptable answers out of five
+        is not a pass, because the fifth is a wrong decision about a real deploy.
+        """
+        return all(self.label.verdict_is_acceptable(level) for level in self.unaided_levels)
 
     @property
     def is_stable(self) -> bool:
@@ -234,6 +268,29 @@ class EvalRun:
         the gate is worth having at all."""
         return self._rate(UNDER_FLAG_KINDS, "under")
 
+    @property
+    def floored(self) -> tuple[ScenarioResult, ...]:
+        """Scenarios the floor raised on at least one attempt."""
+        return tuple(r for r in self.measured_results if r.was_floored)
+
+    @property
+    def floor_rescued(self) -> tuple[ScenarioResult, ...]:
+        """Scenarios that pass ONLY because of the floor.
+
+        The floor's actual contribution, as opposed to the times it agreed with
+        a model that was already cautious enough. D-082 sized this by running
+        the whole set twice; this computes it from one run.
+        """
+        return tuple(r for r in self.measured_results if r.passed and not r.passed_unaided)
+
+    @property
+    def under_flagging_unaided(self) -> tuple[int, int]:
+        """What the model alone would have scored, floor removed."""
+        scored = [
+            r for r in self.measured_results if r.label.kind in UNDER_FLAG_KINDS and r.label.scored
+        ]
+        return sum(1 for r in scored if not r.passed_unaided), len(scored)
+
     # --- supporting figures ----------------------------------------------
 
     @property
@@ -317,6 +374,7 @@ def _to_attempt(scenario: str, outcome: Any) -> Attempt:
         input_tokens=call.input_tokens,
         output_tokens=call.output_tokens,
         latency_ms=call.latency_ms,
+        floor_raised_from=verdict.floor_raised_from,
     )
 
 

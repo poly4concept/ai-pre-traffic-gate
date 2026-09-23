@@ -2041,3 +2041,173 @@ incident, and it is what makes it block you for an hour after the incident ends.
 Whether 60 minutes is right is a real decision -- shorter reacts faster and is
 noisier, longer is steadier and holds a grudge -- and it should be made
 deliberately rather than inherited from a default.
+
+---
+
+## F-030 — A timeout that was right for one provider and wrong for the next
+
+**Phase:** 4c
+
+**Symptom:** the first real Gemini call, three times in a row:
+
+```text
+verdict attempt 1 failed (gemini:504, retryable=True): 504 DEADLINE_EXCEEDED
+verdict attempt 2 failed (gemini:504, retryable=True): 504 DEADLINE_EXCEEDED
+verdict attempt 3 failed (gemini:504, retryable=True): 504 DEADLINE_EXCEEDED
+```
+
+Which reads like an outage, and was not one.
+
+**The cause is a number that was copied because it looked like the same number.**
+The Gemini transport set a 60-second — originally 20-second — per-request
+timeout, taken from `READ_TIMEOUT_SECONDS` on the Bedrock side so that "the two
+providers are held to the same patience". That sentence is in the commit and it
+is wrong. 20s was derived from measured Sonnet 4.5 latency against a provisioned
+AWS endpoint. On a free-tier Gemini key the request **queues before the model
+starts**, and the deadline covers the wait as well as the work. The two numbers
+describe different quantities and only one of them is latency.
+
+**What made it diagnosable was measuring instead of theorising.** Two hypotheses
+fit the symptom equally well:
+
+* **A** — Gemini 3.x models think by default, thinking tokens come out of the
+  same `max_output_tokens` budget, and 1024 was being consumed by thoughts.
+* **B** — the request was simply not finishing inside 20 seconds.
+
+A single probe with a long timeout separated them in one call: `finish=STOP`,
+**4.7 seconds**, `thoughts=None`, 126 output tokens, function call present and
+complete. Hypothesis A was dead — nothing was thinking, and the token ceiling
+had four-fifths of its headroom spare. And 4.7s against a 20s ceiling meant the
+failures could not be about how long inference takes, which leaves queue time.
+
+**The fix that would have been a bug.** Acting on hypothesis A meant setting
+`ThinkingConfig(thinking_budget=0)`, which the documentation describes as
+DISABLED. The same probe tried it:
+
+```text
+400 INVALID_ARGUMENT
+```
+
+The allowed budget range is model-dependent and zero is not in it for this
+model. So the "fix" for the wrong diagnosis would have failed in a completely
+new way, on a config change, and the next hour would have gone into a schema
+argument with the SDK rather than into a timeout.
+
+**Lessons:**
+
+1. **A constant carries its derivation, and the derivation does not cross a
+   provider boundary.** `READ_TIMEOUT_SECONDS = 20` is documented — at length —
+   as 3.5x Sonnet's median. Every word of that justification is about Bedrock.
+   Reusing the value while leaving the reasoning behind is how a well-commented
+   number becomes an unexamined one. The comment made it *look* deliberate in
+   its new home, which is worse than an unexplained literal.
+2. **"Held to the same patience" was a plausible-sounding reason for a decision
+   nobody had actually made.** Parity is the right instinct for the prompt and
+   the schema, where a difference would confound the measurement. It is the
+   wrong instinct for a timeout, where the two services genuinely differ and
+   matching them just means one of the numbers is wrong.
+3. **One probe beat three retries.** The retry loop ran the same failing call
+   three times and produced three identical errors and no new information — the
+   exact shape of the temperature-0 retry problem from F-026, arriving through
+   the transport instead of the prompt. What actually moved things was one call
+   made deliberately differently, with the timeout removed as a variable.
+4. **The free tier is a different service, not a cheaper one.** Queueing under
+   contention is a property of the tier. Anything calibrated against a paid or
+   provisioned endpoint should be re-derived rather than inherited, and the cost
+   of being too generous with a timeout is a slow failure, while the cost of
+   being too tight is a fail-closed verdict recorded against a model that would
+   have answered — which pollutes the eval with UNMEASURED rows (F-018).
+
+---
+
+## F-031 — Two identical runs, two different answers, and the floor was the only stable thing
+
+**Phase:** 4c
+
+**What happened:** the Gemini eval was run twice, same model, same 22 fixtures,
+same prompt, three repeats each, temperature 0. The headline numbers were
+identical. The number underneath them was not.
+
+| | run A | run B |
+| --- | --- | --- |
+| under-flagging, **with floor** | 0.0% (0/11) | 0.0% (0/11) |
+| under-flagging, **model alone** | 18.2% (2/11) | 9.1% (1/11) |
+| stable across repeats | 87.0% | 82.6% |
+| `untriaged_severity_findings` | low/low/low | low/low/medium |
+| `critical_cve_no_patch` | floored once | clean |
+
+**Why this is a failure and not a curiosity.** Between the two runs I told
+Mubaraka that Gemini's unaided under-flagging was 18.2%, that it "ties Nova Pro
+and the arithmetic baseline", and — a turn earlier, off a single-repeat run —
+that it got both `critical_cve_*` scenarios right unaided. The first claim is
+run-dependent. The second was wrong. Both were stated with more confidence than
+three samples can support.
+
+**The measurement error, precisely.** Six of the eleven under-flagging scenarios
+are borderline for this model — it answers `medium` or `low` depending on
+nothing we control. Three repeats resolves that into a single modal answer and
+then reports a rate to one decimal place. The rate looks like a measurement of
+the model. Half of it is a measurement of the sample size.
+
+Which means the gaps in the comparison table are not all real:
+
+```
+27.3%  Haiku 4.5, Sonnet 4.5, arithmetic baseline   \  separated by
+18.2%  Nova Pro, Gemini run A                        }  less than the
+ 9.1%  Gemini run B                                 /   run-to-run swing
+```
+
+The 27.3% cluster is far enough from the rest to survive. Everything between
+9.1% and 18.2% is inside the noise, and D-081's "Nova Pro has the best headline
+under-flagging rate" should be read as "Nova Pro is in the better cluster".
+
+**The result that got stronger.** The floored figure was **0.0% on both runs**,
+and the floored per-scenario answers were identical. The deterministic rule did
+not merely improve the average — it removed the variance. That is a property
+arithmetic has and sampling does not, and it is a better argument for the floor
+than the one originally recorded in D-082, which only measured the average
+moving.
+
+**Lessons:**
+
+1. **A rate quoted to one decimal from three samples is false precision, and I
+   published it three times.** The honest reporting unit here is a cluster, not
+   a percentage. `evals/report.py` already refuses to print stability from a
+   single repeat (added the same day, for the same reason); the under-flagging
+   rate needs the same scepticism applied to it and does not yet have it.
+2. **Temperature 0 is not determinism, and this project has now said so twice
+   without acting on it.** `harness.py` has carried the sentence "temperature 0
+   reduces variance; it does not remove it" since Phase 4a. It was written as a
+   caveat and treated as a footnote.
+3. **Re-running the same thing is a cheap experiment and I only did it by
+   accident.** Run B happened because the results file needed a field adding,
+   not because anyone set out to measure reproducibility. It was the most
+   informative 66 calls of the phase.
+4. **The fix is more repeats on the borderline scenarios, not more models.**
+   Adding a fifth model to a benchmark that cannot resolve 9 points is buying
+   precision in the wrong dimension.
+
+**Resolved by seven repeats on the six borderline scenarios (42 calls).** The
+swing had exactly one cause, and it is now measured rather than inferred:
+
+```
+untriaged_severity_findings   low low low low low low low   7/7 wrong, always
+critical_cve_no_patch         low med med med med med high  1/7 wrong, sometimes
+critical_cve_with_patch       (never floored)               0/7 wrong, reliable
+```
+
+`untriaged_severity_findings` is not noise at all -- the model says `low` every
+single time, exactly as Haiku and Sonnet do. `critical_cve_no_patch` is the
+borderline one, wrong on roughly one attempt in seven. With three repeats and a
+rule that every attempt must be acceptable, a 1-in-7 slip shows up in about a
+third of runs -- which is precisely what happened: run A caught it, run B did
+not, and the aggregate moved by a whole scenario.
+
+So the two numbers I reported were both correct readings of a rate that was
+never stable to the precision I quoted it at. The fix was not a better model or
+a better prompt. It was more samples on the six scenarios that were actually in
+question, at a cost of 42 calls and four minutes.
+
+**The clean statement, which needed no revision afterwards:** one scenario every
+model misses every time, one scenario this model misses occasionally, and the
+floor covers both. That sentence contains no percentage and loses nothing.

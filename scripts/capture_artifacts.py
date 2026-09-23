@@ -82,6 +82,7 @@ def model_comparison() -> str | None:
         ("Haiku 4.5", _load("2026-09-08-haiku-asymmetric.json")),
         ("Sonnet 4.5", _load("sonnet-4-5.json")),
         ("Nova Pro", _load("nova-pro.json")),
+        ("Gemini Flash-Lite", _load("gemini.json")),
     ]
     runs = [(label, r) for label, r in runs if r]
     if len(runs) < 2:
@@ -93,14 +94,30 @@ def model_comparison() -> str | None:
         f"_Generated {_stamp()} by `scripts/capture_artifacts.py`._",
         "",
         "Same 23 scenarios, three repeats each, temperature 0, identical prompt.",
-        "**Before the deterministic floor** -- see `floor-effect.md` for after.",
+        "Three vendors. The prompt, the schema and the validator are shared byte for",
+        "byte across providers, so this compares models rather than adapters (D-083).",
+        "",
+        "**Read the two under-flagging rows together, not the first one alone.**",
+        "`as run` is each file's headline. It is NOT comparable across columns: the",
+        "Claude runs predate the deterministic floor entirely, the Nova Pro run cannot",
+        "be placed either side of it, and the Gemini run is floored. `model alone` is",
+        "the comparable figure, and it only exists where the run recorded the pre-floor",
+        "level per attempt (Phase 4c onward) -- a dash means unrecorded, not unfloored.",
+        "",
+        "That ambiguity is the reason the field was added. A table that printed one",
+        "under-flagging number per model would have credited arithmetic to judgement in",
+        "one column and not the others, and nothing on the page would have said so.",
         "",
         "| | " + " | ".join(label for label, _ in runs) + " |",
         "| --- |" + " --- |" * len(runs),
     ]
 
     rows = [
-        ("under-flagging", lambda r: _rate(r["under_flagging"])),
+        ("under-flagging (as run)", lambda r: _rate(r["under_flagging"])),
+        (
+            "under-flagging (model alone)",
+            lambda r: _rate(r["under_flagging_unaided"]) if "under_flagging_unaided" in r else "-",
+        ),
         ("over-flagging", lambda r: _rate(r["over_flagging"])),
         ("acceptable verdict", lambda r: _rate(r["passes"])),
         ("stable across repeats", lambda r: _rate(list(r["stability"]))),
@@ -111,7 +128,7 @@ def model_comparison() -> str | None:
 
     # Which scenarios each model failed. The aggregate is where you look; this
     # is what you find (D-081).
-    lines += ["", "## Where they disagree", "", "Scenarios not all three agreed on:", ""]
+    lines += ["", "## Where they disagree", "", "Scenarios the models did not all agree on:", ""]
     lines.append("| scenario | " + " | ".join(label for label, _ in runs) + " |")
     lines.append("| --- |" + " --- |" * len(runs))
 
@@ -129,11 +146,18 @@ def model_comparison() -> str | None:
         "",
         "`!` marks a failure against the label. ",
         "",
-        "**The finding:** Nova Pro has the best headline under-flagging rate and wins it "
-        "entirely on the three security scenarios -- the ones the deterministic floor was "
-        "about to remove from the model's job -- while failing "
-        "`prompt_injection_in_commit_message`, which no code can fix. "
-        "A headline rate can be right for the wrong reasons (D-081).",
+        "**Two findings, and the second one is the reason the floor exists.**",
+        "",
+        "Nova Pro's headline under-flagging rate is earned entirely on the three "
+        "security scenarios -- the ones the floor was about to remove from the model's "
+        "job -- while it fails `prompt_injection_in_commit_message`, which no code can "
+        "fix. A headline rate can be right for the wrong reasons (D-081).",
+        "",
+        "And `untriaged_severity_findings` is missed, unaided, by every model tried "
+        "across all three vendors. Not a capability gap -- Gemini Flash-Lite is a "
+        "fraction of Sonnet's size and beats it everywhere else. A finding whose "
+        "severity was never scored reads as harmless to all of them, which is a fact "
+        "about the instruction rather than about any one model (D-084).",
         "",
         "**Source:** " + ", ".join(f"`evals/results/{r['_source']}`" for _, r in runs),
     ]

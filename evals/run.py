@@ -7,6 +7,9 @@
     # a real model, once Bedrock has quota
     python -m evals.run --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0
 
+    # a fourth opinion from outside AWS (needs GEMINI_API_KEY)
+    python -m evals.run --gemini-model gemini-3.5-flash-lite
+
     # verdict stability on identical input
     python -m evals.run --model-id <id> --repeats 5
 
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -44,16 +48,72 @@ from evals.labels import coverage_report  # noqa: E402
 from evals.report import format_run  # noqa: E402
 from evals.stub import AttributeCountingClient  # noqa: E402
 
+# The gate budgets 35 seconds because it is holding up a pipeline stage. An eval
+# is not, and the two constraints genuinely differ: on a free-tier key a single
+# scenario may spend most of a minute waiting out a rate limit, and failing that
+# scenario closed would record a HIGH verdict the model never gave -- which
+# Phase 4b already learned to treat as unmeasured rather than as judgement
+# (F-018). Waiting is cheaper than an unmeasured row.
+#
+# Sized so all three attempts can actually happen: the Gemini transport allows
+# 60s per request, and 60 + 0.5 + 60 + 1.5 + 60 is a little over 180. At the
+# 120s this started out as, the predictive deadline check would refuse the
+# SECOND attempt on any slow run -- a retry budget of three that spends one,
+# which is the kind of number that looks configured and is not.
+EVAL_DEADLINE_SECONDS = 240.0
+
+
+def load_dotenv(path: Path) -> None:
+    """Put `.env` into the environment, if it exists. Ten lines beats a dependency.
+
+    Deliberately does NOT overwrite a variable that is already set: an explicitly
+    exported key should win over a file the user forgot they wrote months ago.
+    Silent when the file is absent, because it is optional -- exporting
+    GEMINI_API_KEY in the shell is an equally valid way to run this.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
 
 def build_client(args) -> tuple[object, str]:
     if args.baseline:
         client = AttributeCountingClient()
         return client, client.MODEL_ID
 
+    if args.gemini_model:
+        load_dotenv(REPO_ROOT / ".env")
+        # Imported here, not at module scope, so that `--baseline` and the
+        # Bedrock path keep working on a machine that has never installed the
+        # Google SDK. It is an optional `[evals]` dependency for exactly this
+        # reason.
+        from verdict.gemini import GeminiVerdictClient, build_genai_client
+
+        return (
+            GeminiVerdictClient(
+                args.gemini_model,
+                build_genai_client(),
+                # The free tier's per-minute ceiling is the binding constraint,
+                # and a paced call that succeeds beats a fast one that 429s.
+                # The deadline has to allow for that pacing plus a real attempt,
+                # so it is raised well above the 35s the gate runs with in
+                # production -- an eval is not inside a pipeline stage.
+                deadline_seconds=args.deadline,
+            ),
+            args.gemini_model,
+        )
+
     from verdict import BedrockVerdictClient, build_bedrock_client
 
     return (
-        BedrockVerdictClient(args.model_id, build_bedrock_client(args.region)),
+        BedrockVerdictClient(
+            args.model_id, build_bedrock_client(args.region), deadline_seconds=args.deadline
+        ),
         args.model_id,
     )
 
@@ -67,7 +127,21 @@ def main() -> int:
         help="run the attribute-counting baseline instead of a model (default)",
     )
     group.add_argument("--model-id", help="Bedrock inference profile ID")
+    group.add_argument(
+        "--gemini-model",
+        help="Gemini model ID, e.g. gemini-3.5-flash-lite. Needs GEMINI_API_KEY",
+    )
     parser.add_argument("--region", default="us-east-1")
+    parser.add_argument(
+        "--deadline",
+        type=float,
+        default=EVAL_DEADLINE_SECONDS,
+        help=(
+            "seconds per scenario before failing closed. Higher than the gate's "
+            "own 35s because an eval is not inside a pipeline stage and a "
+            "rate-limited retry is worth waiting for"
+        ),
+    )
     parser.add_argument(
         "--repeats",
         type=int,
@@ -104,7 +178,7 @@ def main() -> int:
         print("everything, and measures the over-flagging rate against almost nothing.")
         return 0
 
-    if not args.baseline and not args.model_id:
+    if not args.baseline and not args.model_id and not args.gemini_model:
         args.baseline = True
 
     if args.repeats < 1:
@@ -126,6 +200,7 @@ def main() -> int:
             "repeats": run.repeats,
             "over_flagging": run.over_flagging,
             "under_flagging": run.under_flagging,
+            "under_flagging_unaided": run.under_flagging_unaided,
             "passes": run.passes,
             "stability": run.stability,
             "tokens": run.tokens,
@@ -149,6 +224,11 @@ def main() -> int:
                     "passed": r.passed,
                     "direction": r.direction,
                     "stable": r.is_stable,
+                    # What the model said before the floor, so a later reader can
+                    # separate the model's judgement from the arithmetic without
+                    # re-running anything.
+                    "unaided_levels": [str(x) for x in r.unaided_levels],
+                    "passed_unaided": r.passed_unaided,
                     "concern_coverage": r.concern_coverage,
                     "reasoning": r.attempts[0].reasoning,
                 }

@@ -121,7 +121,36 @@ def format_run(run: EvalRun) -> str:
     e_n, e_d = run.exact
     w(f"  acceptable verdict     {_pct(p_n, p_d)}   ({p_n}/{p_d} measured scenarios)")
     w(f"  exactly the ideal      {_pct(e_n, e_d)}   ({e_n}/{e_d})  -- interesting, not a target")
-    w(f"  stable across repeats  {_pct(stable, total)}   ({stable}/{total})")
+    # A single pass cannot measure stability, and saying so is not pedantry.
+    #
+    # `is_stable` asks whether every repeat returned the same level. With one
+    # repeat that is trivially true for every scenario, so the figure reads
+    # `100.0% (23/23)` -- the most reassuring number on the page, measuring
+    # nothing. It is the absent-vs-zero trap that runs through this whole
+    # project, arriving in the tool built to measure the trap.
+    if run.repeats < 2:
+        w("  stable across repeats    n/a   (needs --repeats 2 or more)")
+    else:
+        w(f"  stable across repeats  {_pct(stable, total)}   ({stable}/{total})")
+    # THE FLOOR'S CONTRIBUTION, from this run rather than from a second one.
+    #
+    # Without this line a floored result is indistinguishable from a model that
+    # never needed help, and the headline rate silently credits arithmetic to
+    # judgement -- which is the same confusion `floor_raised_from` exists to
+    # prevent in the audit record (D-082).
+    rescued = run.floor_rescued
+    if run.floored:
+        u_n, u_d = run.under_flagging_unaided
+        w(
+            f"  floor raised           {len(run.floored)} scenario(s); "
+            f"{len(rescued)} would have failed without it"
+        )
+        w(f"  under-flagging unaided {_pct(u_n, u_d)}   ({u_n}/{u_d})  -- the model alone")
+        for result in rescued:
+            before = "/".join(str(x) for x in result.unaided_levels)
+            after = "/".join(str(x) for x in result.levels)
+            w(f"      rescued: {result.scenario}  {before} -> {after}")
+
     ins, outs = run.tokens
     w(f"  tokens                 in={ins:,} out={outs:,} over {total_attempts} attempts")
     if total_attempts:
