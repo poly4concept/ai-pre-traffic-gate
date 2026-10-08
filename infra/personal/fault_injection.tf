@@ -1,6 +1,6 @@
 # Phase 2.5 -- synthesized-real signal generation.
 #
-# CLAUDE.md distinguishes MOCKED signals (hardcoded JSON, unblocks development,
+# docs/design-constraints.md distinguishes MOCKED signals (hardcoded JSON, unblocks development,
 # never touches AWS) from SYNTHESIZED-REAL ones (conditions engineered in the
 # account so real AWS services genuinely emit real findings). Both are required:
 # mocked signals alone hide parsing bugs and produce a demo that cannot be
@@ -15,7 +15,7 @@
 # demo volume rounds to zero. There is no standing hourly charge here, and
 # nothing in this file bills until the demo app is actually invoked.
 #
-# SAFETY, per the rules in CLAUDE.md:
+# SAFETY, per the rules in docs/design-constraints.md:
 #   * the demo app's function URL is AWS_IAM authenticated (D-011), so none of
 #     this is reachable without credentials
 #   * the faults are performance faults only -- latency, errors, memory. There

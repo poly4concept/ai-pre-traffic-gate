@@ -4,7 +4,7 @@ Phase 2.1. These are the *outputs* of collection, deliberately defined before an
 collector exists, because the shape of what the gate knows is a design decision
 and not a byproduct of whichever AWS API happened to be convenient.
 
-Three signal domains, in the order CLAUDE.md ranks them by difficulty:
+Three signal domains, in the order docs/design-constraints.md ranks them by difficulty:
 
     ChangeContext    what is being deployed
     SecurityFindings what is known to be wrong with it

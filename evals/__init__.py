@@ -1,6 +1,6 @@
 """The eval harness. Phase 4.
 
-CLAUDE.md: "I need to measure over-flagging and detect prompt drift as the
+The requirement: "measure over-flagging and detect prompt drift as the
 prompt evolves. This gates everything after it."
 
     labels.py    expected verdicts, written before any model could be called

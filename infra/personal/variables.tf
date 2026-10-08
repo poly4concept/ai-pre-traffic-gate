@@ -208,7 +208,7 @@ variable "bedrock_region" {
 #
 # Standard scanning only is the intended configuration. Phase 2.5 synthesises
 # vulnerable *dependencies*, which is exactly what standard scanning finds, and
-# CLAUDE.md forbids deliberately exploitable application logic -- so code
+# docs/design-constraints.md forbids deliberately exploitable application logic -- so code
 # scanning would cost double to find nothing by design.
 #
 # Setting this false makes the security signal SKIPPED rather than UNAVAILABLE:

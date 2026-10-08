@@ -36,7 +36,7 @@ def item(
     *,
     decision="allow",
     reason="known flaky alarm",
-    actor="arn:aws:iam::594380318102:user/poly4",
+    actor="arn:aws:iam::123456789012:user/poly4",
     created="2026-09-04T11:59:00+00:00",
     expires_in_minutes=30,
 ):

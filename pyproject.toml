@@ -76,7 +76,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     # Anything hitting real AWS is opt-in. The default test run must work
-    # offline with zero credentials — constraint 5 in CLAUDE.md.
+    # offline with zero credentials — constraint 5 in docs/design-constraints.md.
     "aws: touches real AWS APIs (deselect with '-m \"not aws\"')",
     "bedrock: makes a billable Bedrock call",
 ]

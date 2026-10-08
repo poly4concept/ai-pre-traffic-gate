@@ -6,7 +6,7 @@
 
 WHY THIS EXISTS, AND WHY IT SHOULD HAVE EXISTED SOONER
 
-CLAUDE.md's argument for shadow mode is that `would_have_halted` accumulates so
+docs/design-constraints.md's argument for shadow mode is that `would_have_halted` accumulates so
 that "by the time enforcement is switched on there is a real measured
 over-flagging rate to switch it on WITH -- rather than a guess and an apology."
 

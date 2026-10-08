@@ -8,8 +8,8 @@
       "Resource": [
         "arn:aws:bedrock:*::foundation-model/anthropic.*",
         "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
-        "arn:aws:bedrock:*:594380318102:inference-profile/*.anthropic.*",
-        "arn:aws:bedrock:*:594380318102:inference-profile/*.amazon.nova-*"
+        "arn:aws:bedrock:*:123456789012:inference-profile/*.anthropic.*",
+        "arn:aws:bedrock:*:123456789012:inference-profile/*.amazon.nova-*"
       ]
     }
   ]

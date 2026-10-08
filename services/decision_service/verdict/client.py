@@ -45,7 +45,7 @@ THE GUARANTEE THIS MODULE MAKES, unchanged from where it started
 
 `get_verdict()` does not raise. Not "tries not to" -- it has no failure path
 that escapes. Everything that can go wrong returns a `Verdict.fail_closed(...)`
-carrying the reason. That is CLAUDE.md constraint 2 taken literally: fail closed
+carrying the reason. That is docs/design-constraints.md constraint 2 taken literally: fail closed
 is the DEFAULT BRANCH, not an exception handler bolted on later. Written the
 other way round -- a try/except wrapped around the happy path -- the safe
 behaviour depends on someone keeping that except clause correct forever. Here

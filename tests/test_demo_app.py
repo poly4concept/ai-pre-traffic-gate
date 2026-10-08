@@ -1,6 +1,6 @@
 """Tests for the demo app handler.
 
-Runs offline with no credentials, per constraint 5 in CLAUDE.md. There is not
+Runs offline with no credentials, per constraint 5 in docs/design-constraints.md. There is not
 much to test here and that is the point -- the demo app is trivial so that a
 failing pipeline is never ambiguous about where the fault is. What these tests
 actually protect is the response *contract*, because the canary demo reads

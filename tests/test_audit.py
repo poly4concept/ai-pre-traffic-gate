@@ -2,7 +2,7 @@
 
 Four clusters:
 
-  * the record contains what CLAUDE.md constraint 3 asks for, including the raw
+  * the record contains what docs/design-constraints.md constraint 3 asks for, including the raw
     model output BEFORE validation -- the disagreements are the point
   * immutability: a duplicate write is refused, not applied
   * a storage failure degrades the audit trail rather than halting a judged deploy

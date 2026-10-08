@@ -76,7 +76,7 @@ class Action(StrEnum):
     HALT_AND_ESCALATE = "halt_and_escalate"
 
 
-# The risk-to-action mapping from CLAUDE.md, in one readable place.
+# The risk-to-action mapping from docs/design-constraints.md, in one readable place.
 #
 # Exhaustive over RiskLevel by construction: `action_for` raises on an unmapped
 # member rather than defaulting, so adding a fourth risk level fails loudly here
@@ -116,7 +116,7 @@ class Verdict:
     """A validated risk verdict, or a fail-closed stand-in for one.
 
     Frozen because a verdict is a record of a decision that was made. Mutating
-    one after the fact would corrupt the audit trail, which CLAUDE.md treats as
+    one after the fact would corrupt the audit trail, which docs/design-constraints.md treats as
     a demo asset rather than mere hygiene.
     """
 
@@ -201,7 +201,7 @@ class Verdict:
         Reusing HIGH rather than inventing a fourth "unknown" level is
         deliberate: the executor keeps exactly three branches no matter how many
         ways the gate can fail, and "halt and escalate to a human" is already
-        precisely what CLAUDE.md asks for when a signal or the model is missing.
+        precisely what docs/design-constraints.md asks for when a signal or the model is missing.
         `source` is what preserves the distinction that matters.
         """
         return cls(

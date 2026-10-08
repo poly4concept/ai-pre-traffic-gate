@@ -1,6 +1,6 @@
 """The immutable audit record. Phase 3.4.
 
-CLAUDE.md constraint 3: every verdict is auditable and overridable, and the audit
+docs/design-constraints.md constraint 3: every verdict is auditable and overridable, and the audit
 trail is a demo asset rather than mere hygiene. This is that record.
 
 WHAT GOES IN, AND THE ONE THING THAT DELIBERATELY DOES NOT
@@ -161,7 +161,7 @@ def build_record(
         # in the AWS console can tell you its value -- but every verdict can.
         # `scripts/preflight.py` reads it from here for exactly that reason.
         "model_verdict_can_act": model_verdict_can_act,
-        # CLAUDE.md constraint 3: "every verdict is auditable and OVERRIDABLE",
+        # docs/design-constraints.md constraint 3: "every verdict is auditable and OVERRIDABLE",
         # and an override nobody recorded is indistinguishable from the gate
         # having decided that way on its own. Stored even when it agrees with the
         # model, because "a human forced allow and the model also said allow" and

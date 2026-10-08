@@ -146,7 +146,7 @@ def test_the_body_carries_the_reasoning_and_the_concerns():
 
 
 def test_the_body_carries_the_signals_it_was_based_on():
-    """CLAUDE.md's requirement: the verdict, the reasoning, AND the signals.
+    """docs/design-constraints.md's requirement: the verdict, the reasoning, AND the signals.
 
     A halt with no evidence attached makes the reader go and find the evidence,
     which is exactly the work the escalation was supposed to save them.
@@ -271,7 +271,7 @@ def load(monkeypatch, mode, topic="arn:aws:sns:us-east-1:1:t"):
 def test_who_gets_told(monkeypatch, decision, mode, expected):
     """Shadow records and says nothing; advisory is where the emails start.
 
-    That ordering is CLAUDE.md's "advisory mode before enforcing mode" and it
+    That ordering is docs/design-constraints.md's "advisory mode before enforcing mode" and it
     only means something now -- until 5.2 the two modes behaved identically.
     """
     handler = load(monkeypatch, mode)

@@ -72,7 +72,7 @@ resource "aws_cloudwatch_log_group" "gate_stub" {
   retention_in_days = 7
 }
 
-# This policy is the hard design constraint from CLAUDE.md, written down.
+# This policy is the hard design constraint from docs/design-constraints.md, written down.
 #
 # Logs, and the CodePipeline job-result calls. That is the entire permission
 # set. Specifically absent, and absent on purpose:

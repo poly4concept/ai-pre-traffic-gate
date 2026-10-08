@@ -5,7 +5,7 @@ context), 2.3 (Inspector) and 2.4 (CloudWatch), in that order because that is
 increasing order of difficulty, and each will sit beside its mock in this file's
 place in the package.
 
-Why mocks first, from CLAUDE.md constraint 5: the whole flow must run end to end
+Why mocks first, from docs/design-constraints.md constraint 5: the whole flow must run end to end
 with zero real AWS signal dependencies. Development must not be blocked on
 Inspector onboarding or on generating production traffic, Phase 4's fixtures
 need signals that never change, and tests must run offline.

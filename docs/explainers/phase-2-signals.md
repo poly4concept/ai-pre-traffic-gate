@@ -46,7 +46,7 @@ Three mechanisms enforce it:
    only the happy path and may raise freely. A contributor who never reads this
    document still gets it right.
 
-That third one is the design choice worth stealing: make the safe behaviour
+That third one is the design choice worth copying: make the safe behaviour
 structural, not something each author has to remember.
 
 ---
@@ -172,7 +172,7 @@ Against this repository's own history:
   "files_changed": 26,
   "lines_added": 3739,
   "lines_removed": 41,
-  "paths": ["CLAUDE.md", "DECISIONS.md", "..."],
+  "paths": ["README.md", "DECISIONS.md", "..."],
   "paths_omitted": 14
 }
 ```
@@ -232,7 +232,7 @@ The account's actual state:
 
 ```text
 $ aws inspector2 batch-get-account-status
-594380318102   DISABLED   lambda: DISABLED   ecr: DISABLED   ec2: DISABLED
+123456789012   DISABLED   lambda: DISABLED   ecr: DISABLED   ec2: DISABLED
 ```
 
 Amazon Inspector had **never been switched on**. And the API for "show me the
@@ -324,7 +324,7 @@ Same reasoning as `paths_omitted` in the change-context payload. Until 2.3,
 
 Verified from the AWS Price List API, not from memory. At three Lambdas: about
 **$0.92/month** for standard scanning. Standard is enough — Phase 2.5 synthesises
-vulnerable *dependencies*, and CLAUDE.md forbids deliberately exploitable
+vulnerable *dependencies*, and ../../docs/design-constraints.md forbids deliberately exploitable
 application logic, so code scanning would cost double to find nothing by design.
 
 Declining to enable Inspector is a supported state. `security_scanning = false`

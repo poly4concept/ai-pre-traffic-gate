@@ -52,7 +52,7 @@ class FakeInspector:
         return {
             "accounts": [
                 {
-                    "accountId": "594380318102",
+                    "accountId": "123456789012",
                     "state": {"status": self._account_status},
                     "resourceState": {"lambda": {"status": self._lambda_status}},
                 }
@@ -75,7 +75,7 @@ class FakeInspector:
 
 def finding(severity="CRITICAL", vuln_id="CVE-2024-1", fixed="1.2.1", name="example-lib"):
     return {
-        "findingArn": f"arn:aws:inspector2:us-east-1:594380318102:finding/{vuln_id}",
+        "findingArn": f"arn:aws:inspector2:us-east-1:123456789012:finding/{vuln_id}",
         "severity": severity,
         "title": f"{vuln_id} - {name}",
         "type": "PACKAGE_VULNERABILITY",

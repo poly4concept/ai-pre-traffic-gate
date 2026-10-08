@@ -10,7 +10,7 @@
 
 THE TEARDOWN IS `off`, AND IT IS THE IMPORTANT COMMAND
 
-CLAUDE.md requires every synthesized condition to have a documented recipe and a
+docs/design-constraints.md requires every synthesized condition to have a documented recipe and a
 documented teardown. `off` is the teardown, it takes effect within the app's
 cache window (5 seconds by default), and it is the one command worth memorising
 before a live demo.

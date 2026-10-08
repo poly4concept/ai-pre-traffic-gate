@@ -15,7 +15,7 @@
 #
 # STANDING COST IS ZERO. PAY_PER_REQUEST means an idle table bills nothing but
 # storage, and 25 GB free covers this table for years. That is what makes it
-# compatible with the no-standing-hourly-cost constraint in CLAUDE.md -- unlike a
+# compatible with the no-standing-hourly-cost constraint in docs/design-constraints.md -- unlike a
 # NAT gateway or always-on Fargate, there is no clock running.
 
 resource "aws_dynamodb_table" "verdicts" {

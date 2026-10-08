@@ -206,7 +206,7 @@ model and the plumbing — and no way to separate them. Having watched a traffic
 split happen and a pipeline get blocked, both by hand, there are now zero
 suspects. Anything that breaks after Phase 3 is the model or the signals.
 
-This is the phase CLAUDE.md warns is skipped and then debugged forever.
+This is the step that gets skipped and then debugged forever.
 
 ---
 

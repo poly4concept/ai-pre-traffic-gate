@@ -441,7 +441,7 @@ def test_the_raw_model_output_reaches_the_record(monkeypatch):
 
 
 def test_an_override_is_persisted_in_the_record(monkeypatch):
-    """CLAUDE.md constraint 3: every verdict is auditable AND overridable."""
+    """docs/design-constraints.md constraint 3: every verdict is auditable AND overridable."""
     handler = load_with_table(monkeypatch, "allow", "shadow")
     writer = FakeAuditWriter()
 
@@ -750,7 +750,7 @@ def test_a_disabled_inspector_reports_unavailable_through_the_gate(monkeypatch):
             return {
                 "accounts": [
                     {
-                        "accountId": "594380318102",
+                        "accountId": "123456789012",
                         "state": {"status": "DISABLED"},
                         "resourceState": {"lambda": {"status": "DISABLED"}},
                     }

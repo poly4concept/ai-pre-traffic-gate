@@ -327,7 +327,7 @@ data "aws_iam_policy_document" "executor" {
   #
   # Absent on purpose: PutItem, UpdateItem, DeleteItem, and BatchWriteItem. If
   # the executor could write here it could manufacture a `low` verdict for
-  # itself, and CLAUDE.md constraint 1 would be a comment rather than a control.
+  # itself, and docs/design-constraints.md constraint 1 would be a comment rather than a control.
   statement {
     sid       = "ReadVerdicts"
     actions   = ["dynamodb:GetItem"]

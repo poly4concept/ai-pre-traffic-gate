@@ -211,7 +211,7 @@ everything looks correct until you try to prove the canary worked.
 
 **Why AWS_IAM now, while the app is harmless:** in Phase 2.5 this same function
 gains dependencies with published CVEs so Amazon Inspector emits genuine
-findings. CLAUDE.md's safety rule is that it must never be internet-reachable
+findings. docs/design-constraints.md's safety rule is that it must never be internet-reachable
 without auth. Setting auth at creation means there is no later moment where
 someone has to remember to lock it down — the vulnerable dependencies land in a
 service that is already closed.
@@ -267,7 +267,7 @@ no code path that reaches `allow` other than by exact match, and no
 `except: return allow` anywhere in the codebase.
 
 **Why the distinction matters:** "fail closed" implemented as an exception
-handler only covers the failures you thought of. CLAUDE.md's constraint 2 lists
+handler only covers the failures you thought of. docs/design-constraints.md's constraint 2 lists
 model unavailable, schema invalid, signals missing, and throttling — and F-004
 had already produced a failure outside that list (an unsubscribed AWS
 Marketplace agreement) before any model existed. A catch-all default covers the
@@ -601,7 +601,7 @@ At three Lambdas that is roughly **$0.92/month** versus $2.76. Both dimensions
 also have `-free-trial` variants priced at zero.
 
 **Why standard is sufficient:** Phase 2.5 synthesises deliberately vulnerable
-*dependencies*, which is precisely what standard scanning detects. CLAUDE.md
+*dependencies*, which is precisely what standard scanning detects. docs/design-constraints.md
 forbids deliberately exploitable application logic, so code scanning would cost
 double to find nothing by design.
 
@@ -623,7 +623,7 @@ read as "nothing wrong".
 `boto3.resource` with a function that raises. Opt out per-test with
 `@pytest.mark.aws`. Nothing currently opts out.
 
-**Why:** CLAUDE.md constraint 5 was satisfied by construction until Phase 2.3,
+**Why:** docs/design-constraints.md constraint 5 was satisfied by construction until Phase 2.3,
 when the gate began building a real Inspector client by default. The suite
 silently started making live API calls and its runtime went from 2 seconds to 88
 (FAILURES.md F-011).
@@ -916,7 +916,7 @@ nothing. `0.0` would fabricate a measurement, and Phase 4 would then average it
 in alongside real ones.
 
 **Why `HIGH` and not a fourth level:** "halt and escalate to a human" is already
-exactly what CLAUDE.md asks for when the model or a signal is missing. Reusing
+exactly what docs/design-constraints.md asks for when the model or a signal is missing. Reusing
 `HIGH` means the executor keeps **three** branches no matter how many new ways
 the gate learns to fail.
 
@@ -1330,7 +1330,7 @@ trail**, which is a strange and useful capability to leave lying around.
 **Decision, with the reasoning for each, because all four are demo content:**
 
 **`PAY_PER_REQUEST`, not provisioned.** Provisioned capacity bills per hour
-whether or not a deploy happens — precisely the shape of cost CLAUDE.md forbids
+whether or not a deploy happens — precisely the shape of cost docs/design-constraints.md forbids
 without asking first. It is also simply the wrong fit: pipeline traffic is bursty
 and near-zero between runs, which is the case on-demand exists for. Verified
 cost at soak volume is about **$0.01/month**, and standing cost is genuinely
@@ -2000,7 +2000,7 @@ produce a verdict and act on one:
 
 Absent on purpose from the executor's policy: `PutItem`, `UpdateItem`,
 `DeleteItem`, `BatchWriteItem`. With any of them, the executor could
-manufacture a `low` verdict for itself and CLAUDE.md constraint 1 would be a
+manufacture a `low` verdict for itself and docs/design-constraints.md constraint 1 would be a
 comment rather than a control.
 
 `Query` is scoped to the **index ARN**, not the table. So the executor can look
@@ -2085,7 +2085,7 @@ existing `BLOCKING_MODES = {"enforcing"}`. Shadow records and says nothing.
 
 **Why this needed deciding at all.** Until Phase 5.2, `shadow` and `advisory`
 did *exactly the same thing*: form a verdict, write a record, take no action.
-CLAUDE.md calls for "advisory mode before enforcing mode" as a rollout step, and
+docs/design-constraints.md calls for "advisory mode before enforcing mode" as a rollout step, and
 that step had nothing in it — moving from shadow to advisory changed a string in
 an environment variable and no observable behaviour.
 

@@ -16,22 +16,22 @@ the fix, and the generalisable lesson.
 **Symptom:**
 
 ```text
-AccessDeniedException: User: arn:aws:iam::594380318102:user/ai-agent is not
+AccessDeniedException: User: arn:aws:iam::123456789012:user/ai-agent is not
 authorized to perform: bedrock:InvokeModel on resource:
-arn:aws:bedrock:us-east-1:594380318102:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0
+arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0
 because no identity-based policy allows the bedrock:InvokeModel action
 ```
 
 **What happened:** The Bedrock invoke policy was drafted using the account ID
-returned by the `default` AWS CLI profile (`057455321407`). The `ai-agent` and
-`poly4` users live in a different account (`594380318102`). The policy was
+returned by the `default` AWS CLI profile (`210987654321`). The `ai-agent` and
+`poly4` users live in a different account (`123456789012`). The policy was
 syntactically valid, applied cleanly, and granted nothing.
 
 **Why it happened:** Multiple AWS profiles on one machine pointing at different
 accounts, and an assumption that the default profile represented the project
 account. It did not — it belonged to an unrelated account entirely.
 
-**Fix:** Corrected the inference-profile ARN to name `594380318102`.
+**Fix:** Corrected the inference-profile ARN to name `123456789012`.
 
 **Lessons:**
 
@@ -71,7 +71,7 @@ grants nothing usable.
 **Lesson:** "the model is listed in the region" and "I can invoke the model"
 are different claims, and so is "my IAM policy names the right resource type".
 `scripts/check_bedrock_access.py` tests all three separately for this reason.
-This is exactly the class of stale-training-data assumption CLAUDE.md warns
+This is exactly the class of stale-training-data assumption docs/design-constraints.md warns
 about, and it was caught by running the call rather than by reasoning about it.
 
 ---
@@ -318,7 +318,7 @@ Source, Build and Gate all succeeded.
 ```text
 AccessDeniedException: User: .../ai-pre-traffic-gate-executor is not authorized
 to perform: codedeploy:RegisterApplicationRevision on resource:
-arn:aws:codedeploy:us-east-1:594380318102:application:ai-pre-traffic-gate-demo-app
+arn:aws:codedeploy:us-east-1:123456789012:application:ai-pre-traffic-gate-demo-app
 ```
 
 **What happened:** the executor's policy was written by asking "what resource am
@@ -470,7 +470,7 @@ know", never toward a confident wrong answer.
 delivered through AWS Marketplace, which is what drags in the subscription and
 the `INVALID_PAYMENT_INSTRUMENT` failure of F-004. Amazon Nova is AWS's own
 first-party model and should not touch Marketplace at all. So develop on Nova,
-defer the card until Phase 4, and compare models later — which CLAUDE.md
+defer the card until Phase 4, and compare models later — which the plan
 already wanted anyway.
 
 **Half of that turned out to be true.** Nova did get past the Marketplace gate.
@@ -611,7 +611,7 @@ scanned, genuinely clean resource produces.
 
 ```text
 $ aws inspector2 batch-get-account-status
-594380318102   DISABLED   lambda: DISABLED   lambdaCode: DISABLED   ecr: DISABLED
+123456789012   DISABLED   lambda: DISABLED   lambdaCode: DISABLED   ecr: DISABLED
 ```
 
 Amazon Inspector had never been switched on. Not misconfigured, not mid-scan —
@@ -681,7 +681,7 @@ account.
 client argument. The collector builds its boto3 client lazily — so every test
 that exercised the gate handler silently made three live Inspector API calls.
 
-**Why the slowness was the least of it.** CLAUDE.md constraint 5 requires the
+**Why the slowness was the least of it.** docs/design-constraints.md constraint 5 requires the
 whole flow to run with zero real AWS dependencies. Tests that reach AWS:
 
 - depend on credentials, so they fail in CI and pass on a laptop;
@@ -1150,8 +1150,8 @@ project will actually use, at 470 bytes.
 ```json
 "arn:aws:bedrock:*::foundation-model/anthropic.*",
 "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
-"arn:aws:bedrock:*:594380318102:inference-profile/*.anthropic.*",
-"arn:aws:bedrock:*:594380318102:inference-profile/*.amazon.nova-*"
+"arn:aws:bedrock:*:123456789012:inference-profile/*.anthropic.*",
+"arn:aws:bedrock:*:123456789012:inference-profile/*.amazon.nova-*"
 ```
 
 **The region wildcard is a deliberate widening,** and worth being explicit about
@@ -1475,7 +1475,7 @@ docstring, written in Phase 3.5, says:
 > an apology.
 
 That is the entire justification for running shadow mode, it is quoted from
-CLAUDE.md, and it was false for two phases. Nothing was accumulating. The plan
+the design brief, and it was false for two phases. Nothing was accumulating. The plan
 was to turn enforcement on using evidence that did not exist, and the plan said
 so in a comment nobody re-read against the data.
 

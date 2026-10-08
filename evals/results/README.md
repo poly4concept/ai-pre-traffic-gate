@@ -1,12 +1,36 @@
-# Eval results — Phase 4b, first live runs
+# Eval results
 
-Raw output from `python -m evals.run --json`, kept in the repo on purpose. The
-talk claims specific numbers about what the gate got wrong, and a number with no
-artifact behind it is an anecdote.
+Raw output from `python -m evals.run --json`, kept in the repo on purpose. A
+number with no artifact behind it is an anecdote.
+
+## Which file is which
+
+| file | what it is |
+| --- | --- |
+| `baseline.json` | the arithmetic control, current fixture set |
+| `2026-09-08-haiku-asymmetric.json` | Claude Haiku 4.5 |
+| `sonnet-4-5.json` / `sonnet-4-5-with-floor.json` | Claude Sonnet 4.5, before and after the deterministic floor |
+| `nova-pro.json` | Amazon Nova Pro |
+| **`gemini.json`** | **Gemini 3.5 Flash-Lite — canonical** |
+| `gemini-borderline.json` | diagnostic only: 7 repeats over 6 scenarios. Its two rates sit on truncated denominators and are not comparable to anything |
+| `2026-09-02-haiku_pass*.json` | **superseded.** 22 scenarios / 21 scored, before the set was completed |
+
+All current files are 23 scenarios / 22 scored, three repeats, temperature 0,
+identical prompt. The README's table is built from them.
+
+---
+
+## Phase 4b — the first live runs (superseded, kept as evidence)
+
+**Everything below this line is the 21-scored fixture set and does not match the
+figures in the top-level README.** It is kept because it is the evidence for
+F-017 and F-018 and because the prompt-modularity finding still holds. Do not
+quote its percentages.
 
 Model: `us.anthropic.claude-haiku-4-5-20251001-v1:0`, us-east-1, temperature 0.
-Baseline: `evals/stub.py`, the attribute-counting client — fifteen lines of
-arithmetic that reads no prose.
+Baseline: `evals/stub.py`, the attribute-counting client — it scores by counting
+attributes and reads no prose at all. (Not to be confused with the deterministic
+security floor in `verdict/floor.py`, which is the fifteen-line one.)
 
 ## The headline
 

@@ -2,7 +2,7 @@
 
 WHY THIS EXISTS
 
-CLAUDE.md draws a hard line between two kinds of signal:
+docs/design-constraints.md draws a hard line between two kinds of signal:
 
     MOCKED           hardcoded JSON from a collector's mock implementation.
                      Unblocks development. Never touches AWS.

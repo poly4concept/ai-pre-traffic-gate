@@ -16,7 +16,7 @@ Now the four Phase 3 pieces are wired together:
 THE PHASE 3 RESTRICTION, STATED IN CODE
 
 `MODEL_VERDICT_CAN_ACT = False`. The gate forms a real opinion, records it in
-full, and takes no action on it. That is CLAUDE.md's "shadow mode only", and it
+full, and takes no action on it. That is docs/design-constraints.md's "shadow mode only", and it
 is one constant rather than a scattering of `if` statements so that Phase 5 is a
 visible, reviewable, one-line change rather than an archaeology exercise.
 
@@ -139,7 +139,7 @@ BLOCKING_MODES = frozenset({"enforcing"})
 
 # Modes in which the gate tells a human. This is what finally makes the three
 # modes distinct -- until Phase 5.2 `shadow` and `advisory` behaved identically,
-# which meant CLAUDE.md's "advisory mode before enforcing mode" was a rollout
+# which meant docs/design-constraints.md's "advisory mode before enforcing mode" was a rollout
 # step with nothing in it.
 #
 #   shadow     record it, say nothing        (measure the over-flagging rate)

@@ -421,7 +421,7 @@ def render_bundle(bundle: SignalBundle) -> str:
     """Render a signal bundle as the body of the user message.
 
     Pure function of the bundle, so the same bundle always renders the same
-    bytes. That is what makes deterministic replay (CLAUDE.md constraint 6)
+    bytes. That is what makes deterministic replay (docs/design-constraints.md constraint 6)
     possible -- a prompt that varied run to run would make verdict differences
     unattributable.
 

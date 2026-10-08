@@ -54,3 +54,7 @@ Thumbs.db
 # build artefact and none of it should be committed.
 response.json
 quota_sweep.json
+
+# Private working brief — instructions for the AI assistant, not public docs.
+# The public, technical half of it lives in docs/design-constraints.md.
+CLAUDE.md

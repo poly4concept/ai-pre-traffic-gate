@@ -49,7 +49,7 @@ if _DEMO_APP not in sys.path:
 def _no_real_aws(request, monkeypatch):
     """Make a real AWS call impossible unless a test explicitly asks for one.
 
-    CLAUDE.md constraint 5 requires the suite to run end to end with zero real
+    docs/design-constraints.md constraint 5 requires the suite to run end to end with zero real
     AWS dependencies. That was true by construction until Phase 2.3, when the
     gate began building a real Inspector client by default -- at which point the
     suite quietly started calling AWS and its runtime went from 2 seconds to 88.

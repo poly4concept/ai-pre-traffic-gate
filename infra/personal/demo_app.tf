@@ -180,7 +180,7 @@ resource "aws_lambda_alias" "live" {
 
 # AWS_IAM auth, never NONE. Callers must sign requests with SigV4.
 #
-# CLAUDE.md's safety rule for the deliberately-vulnerable Phase 2.5 build is
+# docs/design-constraints.md's safety rule for the deliberately-vulnerable Phase 2.5 build is
 # that it is never internet-reachable without auth. Setting that now, while the
 # app is still harmless, means there is no later moment where someone has to
 # remember to lock it down -- the vulnerable dependencies land in a service

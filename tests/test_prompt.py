@@ -421,7 +421,7 @@ def test_inspector_scope_caveat_is_stated_in_the_prompt():
 
 
 def test_the_same_bundle_renders_identical_bytes():
-    """Deterministic replay (CLAUDE.md constraint 6) depends on this.
+    """Deterministic replay (docs/design-constraints.md constraint 6) depends on this.
 
     A prompt that varied run to run would make verdict differences
     unattributable -- new prompt, new model, or a genuinely different change,
