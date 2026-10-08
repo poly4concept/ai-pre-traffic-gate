@@ -21,6 +21,15 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "moto>=5.0.0",
+    # Needed by tests/test_gemini.py, which exercises the transport against
+    # duck-typed responses. The SDK is imported lazily inside `invoke()`, so
+    # `verdict.gemini` IMPORTS without it and only fails when a test actually
+    # calls through -- which means leaving it out of `dev` produces a build that
+    # passes locally and fails in CodeBuild, with an error pointing at Google
+    # rather than at the install line. Costs the Lambda nothing: the deployment
+    # zip is built by Terraform's archive_file from the source directory, not
+    # from site-packages.
+    "google-genai>=2.0.0",
 ]
 # Only the eval harness talks to a second provider. Deliberately NOT a runtime
 # dependency: the gate never calls Gemini, and shipping a provider SDK the

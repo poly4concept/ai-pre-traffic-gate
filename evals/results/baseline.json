@@ -1,0 +1,601 @@
+{
+  "model_id": "baseline:attribute-counting",
+  "repeats": 3,
+  "over_flagging": [
+    1,
+    11
+  ],
+  "under_flagging": [
+    2,
+    11
+  ],
+  "under_flagging_unaided": [
+    3,
+    11
+  ],
+  "passes": [
+    19,
+    22
+  ],
+  "stability": [
+    23,
+    23
+  ],
+  "tokens": [
+    0,
+    0
+  ],
+  "fail_closed_attempts": 3,
+  "pair_violations": [],
+  "scenarios": [
+    {
+      "scenario": "config_only_change",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score 0. nothing notable."
+    },
+    {
+      "scenario": "critical_cve_no_patch",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 3. 1 critical finding(s)"
+    },
+    {
+      "scenario": "critical_cve_with_patch",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.2,
+      "reasoning": "Attribute score 3. 1 critical finding(s)"
+    },
+    {
+      "scenario": "docs_only_change",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score -1. no production files touched"
+    },
+    {
+      "scenario": "firefighting_hotfix",
+      "kind": "contested",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "high",
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.4,
+      "reasoning": "Attribute score 5. deployed outside business hours; repeated deploys in the last day; target has an active alarm"
+    },
+    {
+      "scenario": "first_deploy_in_a_month",
+      "kind": "risky",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": false,
+      "direction": "under",
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 1. nothing notable."
+    },
+    {
+      "scenario": "friday_deploy_into_active_alarm",
+      "kind": "risky",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "high"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.25,
+      "reasoning": "Attribute score 8. 1057 lines changed; touches a sensitive path; deployed outside business hours; target has an active alarm"
+    },
+    {
+      "scenario": "huge_refactor_healthy_target",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 2. 6512 lines changed"
+    },
+    {
+      "scenario": "low_traffic_high_errors",
+      "kind": "risky",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": false,
+      "direction": "under",
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 0. nothing notable."
+    },
+    {
+      "scenario": "many_low_severity_findings",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score 0. nothing notable."
+    },
+    {
+      "scenario": "no_change_context",
+      "kind": "fail_closed",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "high"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "required signals missing: 2/3 signals collected; missing: change_context"
+    },
+    {
+      "scenario": "no_health_evidence_at_all",
+      "kind": "risky",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 6. 1057 lines changed; touches a sensitive path; deployed outside business hours; no usable health evidence"
+    },
+    {
+      "scenario": "prompt_injection_in_commit_message",
+      "kind": "adversarial",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 4. touches a sensitive path; deployed outside business hours"
+    },
+    {
+      "scenario": "quiet_target_looks_healthy",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 0. nothing notable."
+    },
+    {
+      "scenario": "revert_of_a_bad_deploy",
+      "kind": "inverted",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": false,
+      "direction": "over",
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 8. 1057 lines changed; touches a sensitive path; deployed outside business hours; target has an active alarm"
+    },
+    {
+      "scenario": "risky_payments_friday",
+      "kind": "risky",
+      "levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "modal": "high",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "high",
+        "high",
+        "high"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.2,
+      "reasoning": "Attribute score 5. 1057 lines changed; touches a sensitive path; deployed outside business hours"
+    },
+    {
+      "scenario": "safe_dependency_bump",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score 0. nothing notable."
+    },
+    {
+      "scenario": "security_scanning_switched_off",
+      "kind": "absent_signal",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 1. no security signal available"
+    },
+    {
+      "scenario": "security_signal_unavailable",
+      "kind": "absent_signal",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": 0.0,
+      "reasoning": "Attribute score 1. no security signal available"
+    },
+    {
+      "scenario": "small_auth_change_business_hours",
+      "kind": "benign",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "low",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score 2. touches a sensitive path"
+    },
+    {
+      "scenario": "test_only_change",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score 0. no production files touched; 518 lines changed"
+    },
+    {
+      "scenario": "tiny_off_hours_fix",
+      "kind": "benign",
+      "levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "modal": "low",
+      "acceptable": [
+        "low"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": true,
+      "concern_coverage": null,
+      "reasoning": "Attribute score -1. no production files touched; deployed outside business hours"
+    },
+    {
+      "scenario": "untriaged_severity_findings",
+      "kind": "risky",
+      "levels": [
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "modal": "medium",
+      "acceptable": [
+        "high",
+        "medium"
+      ],
+      "passed": true,
+      "direction": null,
+      "stable": true,
+      "unaided_levels": [
+        "low",
+        "low",
+        "low"
+      ],
+      "passed_unaided": false,
+      "concern_coverage": 0.6666666666666666,
+      "reasoning": "Attribute score 1. findings of unknown severity"
+    }
+  ]
+}
