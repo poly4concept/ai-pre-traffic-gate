@@ -13,7 +13,7 @@ decision gets made.
 This project puts it in the room. On every pipeline run it gathers real signals
 about the change and the environment it is going into, asks an Amazon Bedrock
 model for a structured risk verdict, and acts on it: deploy fully, canary, or
-stop and page a human. A reference implementation, not a product — small enough
+stop and page a human. This is a reference implementation, not a product; small enough
 to read in an afternoon, and deliberately honest about what it gets wrong.
 
 ---
@@ -217,9 +217,6 @@ Bedrock-only.**
 Not done: multi-account separation, a least-privilege review, and a long soak run
 under continuous traffic. Built for one personal AWS account, under $4 spent to
 date, almost all of it model tokens.
-
-The repository is `ai-pre-traffic-gate`; the system is the Agentic Deployment
-Gate. Same thing.
 
 ---
 
