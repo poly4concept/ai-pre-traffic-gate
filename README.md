@@ -11,7 +11,7 @@ security scanner, in the commit history — it is just never in the room when th
 decision gets made.
 
 This project puts it in the room. On every pipeline run it gathers real signals
-about the change and the environment it is going into, asks an Amazon Bedrock
+about the change and the environment it is going into, asks an AI
 model for a structured risk verdict, and acts on it: deploy fully, canary, or
 stop and page a human. This is a reference implementation, not a product; small enough
 to read in an afternoon, and deliberately honest about what it gets wrong.
